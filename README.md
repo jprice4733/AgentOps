@@ -29,8 +29,15 @@ A small reusable Python project for transcribing audio files, creating and loadi
    ```bash
    python -m pip install -r requirements.txt
    ```
-3. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.
-4. Start the app:
+3. Install FFmpeg, which pydub uses when extracting audio clips. On Windows,
+   run this in PowerShell and then open a new terminal:
+   ```powershell
+   winget install --id Gyan.FFmpeg.Essentials --exact
+   ```
+   On macOS, use `brew install ffmpeg`; on Debian/Ubuntu, use
+   `sudo apt install ffmpeg`.
+4. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.
+5. Start the app:
    ```bash
    python main.py
    ```
