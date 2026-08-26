@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from langchain.agents import create_agent
 from langchain.tools import tool
@@ -232,7 +233,7 @@ def create_app():
         except Exception as error:
             return ChatResponse(response=f"Chat request failed: {error}")
 
-    @app.get("/")
+    @app.get("/", response_class=HTMLResponse)
     async def get_chat_ui():
         return """
         <!DOCTYPE html>
