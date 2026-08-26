@@ -1,0 +1,105 @@
+/* ============================================================================
+   Design tokens — the app's visual identity (Dataiku brand)
+   ============================================================================
+   This file is the single source of truth for colors, radius, and dark-mode
+   overrides. It was vendored from the `truenorth` design system so the app
+   owns its identity with no external UI dependency.
+
+   How it works:
+   - These CSS variables hold the raw values (HSL, radius).
+   - `src/style.css` bridges them into Tailwind utilities via `@theme inline`
+     (e.g. `--color-primary: var(--primary)` → `bg-primary`, `text-primary`).
+   - Always style via the Tailwind utilities (`bg-background`,
+     `text-muted-foreground`, `border-border`, …). Never hardcode hex values.
+
+   Brand reference: Dataiku Brand Guidelines (primary indigo ≈ #3445CB). To
+   re-theme the whole app, change the values here only.
+
+   | Token                | Used for                                      |
+   |----------------------|-----------------------------------------------|
+   | --background         | Page background                               |
+   | --foreground         | Default text                                  |
+   | --card / -foreground | Card surfaces + their text                    |
+   | --popover            | Floating surfaces (menus, dialogs)            |
+   | --primary            | Brand accent (buttons, active nav, links)     |
+   | --secondary          | Subtle filled surfaces                        |
+   | --muted / -foreground| Muted strips + secondary/caption text         |
+   | --accent             | Hover/selected backgrounds                    |
+   | --destructive        | Errors, destructive actions                   |
+   | --border / --input   | Borders and input outlines                    |
+   | --ring               | Focus rings                                   |
+   | --chart-1..5         | Chart series colors                           |
+   | --sidebar*           | Sidebar surface, text, active item, border    |
+   | --radius             | Corner radius scale base (0.625rem)           |
+   ============================================================================ */
+
+:root {
+  --background: hsl(0 0% 100%);
+  --foreground: hsl(240 10% 3.9%);
+  --card: hsl(0 0% 100%);
+  --card-foreground: hsl(240 10% 3.9%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(240 10% 3.9%);
+  --primary: hsl(233.92 50% 35%);
+  --primary-foreground: hsl(0 0% 98%);
+  --secondary: hsl(240 4.8% 95.9%);
+  --secondary-foreground: hsl(240 5.9% 10%);
+  --muted: hsl(240 4.8% 95.9%);
+  --muted-foreground: hsl(240 3.8% 46.1%);
+  --accent: hsl(240 4.8% 95.9%);
+  --accent-foreground: hsl(240 5.9% 10%);
+  --destructive: hsl(0 84.2% 60.2%);
+  --destructive-foreground: hsl(0 0% 98%);
+  --border: hsl(240 5.9% 90%);
+  --input: hsl(240 5.9% 90%);
+  --ring: hsl(240 5% 64.9%);
+  --chart-1: hsl(22, 84%, 60%);
+  --chart-2: hsl(172, 46%, 48%);
+  --chart-3: hsl(221, 47%, 31%);
+  --chart-4: hsl(72, 77%, 75%);
+  --chart-5: hsl(56, 77%, 69%);
+  --radius: 0.625rem;
+  --sidebar: hsl(223 78% 98%);
+  --sidebar-foreground: hsl(233.92 50% 35%);
+  --sidebar-primary: hsl(233.92 50% 35%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(0 0% 100%);
+  --sidebar-accent-foreground: hsl(233.92 50% 35%);
+  --sidebar-border: hsl(220 13% 91%);
+  --sidebar-ring: hsl(217.2 91.2% 59.8%);
+}
+
+.dark {
+  --background: hsl(240 10% 12%);
+  --foreground: hsl(0 0% 98%);
+  --card: hsl(240 10% 3.9%);
+  --card-foreground: hsl(0 0% 98%);
+  --popover: hsl(240 10% 3.9%);
+  --popover-foreground: hsl(0 0% 98%);
+  --primary: hsl(0 0% 98%);
+  --primary-foreground: hsl(240 5.9% 10%);
+  --secondary: hsl(240 3.7% 15.9%);
+  --secondary-foreground: hsl(0 0% 98%);
+  --muted: hsl(240 3.7% 15.9%);
+  --muted-foreground: hsl(240 5% 64.9%);
+  --accent: hsl(240 3.7% 15.9%);
+  --accent-foreground: hsl(0 0% 98%);
+  --destructive: hsl(0 62.8% 30.6%);
+  --destructive-foreground: hsl(0 0% 98%);
+  --border: hsl(240 3.7% 15.9%);
+  --input: hsl(240 3.7% 15.9%);
+  --ring: hsl(240 4.9% 83.9%);
+  --chart-1: hsl(255, 73%, 50%);
+  --chart-2: hsl(155, 51%, 64%);
+  --chart-3: hsl(56, 77%, 69%);
+  --chart-4: hsl(294, 79%, 58%);
+  --chart-5: hsl(4, 85%, 61%);
+  --sidebar: hsl(240 5.9% 10%);
+  --sidebar-foreground: hsl(240 4.8% 95.9%);
+  --sidebar-primary: hsl(224.3 76.3% 48%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(240 3.7% 15.9%);
+  --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
+  --sidebar-border: hsl(240 3.7% 15.9%);
+  --sidebar-ring: hsl(217.2 91.2% 59.8%);
+}

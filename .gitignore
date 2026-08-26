@@ -1,0 +1,30 @@
+# Local dev overrides — never commit
+.env
+
+# Runtime state (PIDs, logs)
+.run/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.egg-info/
+dist/
+*.egg
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Temp deploy artefacts
+/tmp/

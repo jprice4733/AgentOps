@@ -1,0 +1,39 @@
+[project]
+name = "blueprint"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "sse-starlette>=1.6.0",
+    "pandas>=2.0.0",
+    "dataiku-api-client>=14.4.0",
+    # ── Optional building block deps ─────────────────────────────────────────
+    # All imports are lazy (inside handlers / behind feature flags) so these
+    # packages are never loaded when the corresponding block is disabled.
+    "python-multipart>=0.0.7",   # DOCUMENTS: multipart file upload
+    "langchain-core>=0.3.0",     # CHATBOT + DESCRIBE: LLM agent loop and LangChain message types
+    "pymupdf>=1.24.0",           # DESCRIBE sub-option: PDF rasterisation for LLM describe
+]
+
+# Dev tooling — installed by `uv sync` alongside the app deps, never deployed.
+# The `dku` CLI is NOT here: it is expected to be installed globally and on PATH
+# (authenticate with `dku auth`). This group holds only the in-DSS `dataiku` package.
+[dependency-groups]
+dev = [
+    # The real in-DSS `dataiku` package (data-plane: Dataset.get_dataframe + remote exec),
+    # version-matched to our instance and served unauthenticated by DSS. REQUIRED for local
+    # dev — row reading goes through it with no fallback (run `uv sync` to get it). In the
+    # `dev` group because inside DSS the runtime provides `dataiku` and dev-group deps are not
+    # shipped in the deployable wheel. It imports — but does not bundle — `dataikuapi`, so the
+    # `dataiku-api-client` dependency above stays required. See README "Architecture
+    # decisions" → "Local dataset previews via dataiku-internal-client".
+    "dataiku-internal-client @ https://design.solutions.dataiku-dss.io/public/packages/dataiku-internal-client.tar.gz",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
