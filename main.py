@@ -241,7 +241,7 @@ def create_app():
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <title>WAV Search Agent</title>
+            <title>Audio File Search Agent</title>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; background: #f7f9fc; }
                 .chat-box { background: white; border: 1px solid #dfe3ea; border-radius: 10px; padding: 20px; min-height: 420px; max-height: 520px; overflow-y: auto; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
