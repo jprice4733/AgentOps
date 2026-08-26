@@ -35,6 +35,11 @@ A small reusable Python project for transcribing audio (WAV) files, creating and
    python main.py
    ```
 
+By default, extracted clips include 15 seconds of audio before and after the
+matching transcript segment. Set `CLIP_CONTEXT_SECONDS` in `.env` to change
+that amount, for example `CLIP_CONTEXT_SECONDS=30` for 30 seconds on each
+side. Clip boundaries are automatically limited to the source audio.
+
 > On macOS / zsh, use `python3` for the environment creation step if `python` is not on your PATH.
 > If the venv is already created, you can activate it with:
 > ```bash

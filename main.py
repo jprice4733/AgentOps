@@ -40,6 +40,7 @@ def create_app():
     JSON_DIR = ROOT / "storage" / "json"
     CLIPS_DIR = ROOT / "static" / "clips"
     COLLECTION_NAME = "wav_search_agent_segments"
+    clip_context_seconds = max(0.0, float(os.getenv("CLIP_CONTEXT_SECONDS", "15")))
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     JSON_DIR.mkdir(parents=True, exist_ok=True)
@@ -100,13 +101,13 @@ def create_app():
 
     @tool
     def extract_audio_clip(file_path: str, start_time: float, end_time: float) -> str:
-        """Cut an audio file between start_time and end_time and return the clip URL."""
-        start_ms = int(start_time * 1000)
-        end_ms = int(end_time * 1000)
+        """Cut a transcript segment with surrounding context and return the clip URL."""
         output_filename = f"clip_{Path(file_path).stem}_{start_time:.1f}_{end_time:.1f}.wav"
         output_path = CLIPS_DIR / output_filename
 
         audio = AudioSegment.from_file(file_path)
+        start_ms = max(0, int((start_time - clip_context_seconds) * 1000))
+        end_ms = min(len(audio), int((end_time + clip_context_seconds) * 1000))
         clipped = audio[start_ms:end_ms]
         clipped.export(output_path, format="wav")
         return f"/static/clips/{output_filename}"
