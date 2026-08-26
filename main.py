@@ -17,11 +17,23 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import BaseModel
 from pydub import AudioSegment
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import Distance, PointStruct, VectorParams
 
 
 def create_app():
     load_dotenv()
+
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ]:
+        os.environ.pop(key, None)
 
     AUDIO_DIR = ROOT / "storage" / "audio"
     JSON_DIR = ROOT / "storage" / "json"
@@ -34,24 +46,38 @@ def create_app():
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not found. Add it to your .env file.")
-    os.environ["OPENAI_API_KEY"] = api_key
+        print("OPENAI_API_KEY not found. AI features will be disabled until a valid key is added to .env.")
+    os.environ["OPENAI_API_KEY"] = api_key or ""
 
     qdrant_client = QdrantClient(":memory:")
-    embeddings = OpenAIEmbeddings()
+    embeddings = OpenAIEmbeddings(api_key=api_key) if api_key else None
 
-    if qdrant_client.collection_exists(COLLECTION_NAME):
-        qdrant_client.delete_collection(COLLECTION_NAME)
+    try:
+        if qdrant_client.collection_exists(COLLECTION_NAME):
+            qdrant_client.delete_collection(COLLECTION_NAME)
 
-    qdrant_client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-    )
+        qdrant_client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+        )
+    except Exception as exc:
+        print(f"Qdrant collection setup failed during startup: {exc}")
+
+    def safe_embed_query(text: str):
+        if embeddings is None:
+            return None
+        try:
+            return embeddings.embed_query(text)
+        except Exception as exc:  # pragma: no cover - depends on external API connectivity
+            print(f"OpenAI embedding request failed: {exc}")
+            return None
 
     @tool
     def search_transcript_segments(topic_query: str) -> str:
         """Search transcript segments by semantic similarity."""
-        query_vector = embeddings.embed_query(topic_query)
+        query_vector = safe_embed_query(topic_query)
+        if query_vector is None:
+            return "OpenAI embeddings are unavailable right now. Check your API key and network access."
         search_results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -126,10 +152,16 @@ def create_app():
                     "text": text,
                 }
                 transcript_record["segments"].append(segment_record)
+
+                vector = safe_embed_query(text)
+                if vector is None:
+                    print(f"Skipping embedding for segment in {transcript_path.name}: OpenAI is unavailable.")
+                    continue
+
                 points.append(
                     {
                         "id": point_id,
-                        "vector": embeddings.embed_query(text),
+                        "vector": vector,
                         "payload": segment_record,
                     }
                 )
@@ -138,19 +170,25 @@ def create_app():
             transcripts.append(transcript_record)
 
         if points:
-            qdrant_client.upsert(
-                collection_name=COLLECTION_NAME,
-                points=[
-                    {
-                        "id": point["id"],
-                        "vector": point["vector"],
-                        "payload": point["payload"],
-                    }
-                    for point in points
-                ],
-            )
+            try:
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        PointStruct(
+                            id=point["id"],
+                            vector=point["vector"],
+                            payload=point["payload"],
+                        )
+                        for point in points
+                    ],
+                )
+            except Exception as exc:
+                print(f"Skipping Qdrant indexing due to startup error: {exc}")
 
-        print(f"Indexed {len(points)} segment(s) from {len(transcripts)} JSON transcript(s)")
+        if points:
+            print(f"Indexed {len(points)} segment(s) from {len(transcripts)} JSON transcript(s)")
+        else:
+            print(f"No transcript segments were indexed. Check the transcript JSON files and OpenAI connectivity.")
         return transcripts
 
     load_json_transcripts()
@@ -158,16 +196,18 @@ def create_app():
     app = FastAPI(title="WAV Chat Agent")
     app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    agent_executor = create_agent(
-        llm,
-        [search_transcript_segments, extract_audio_clip],
-        system_prompt=(
-            "You are an audio intelligence agent. "
-            "Search transcript segments and use the exact timestamps with extract_audio_clip. "
-            "Return the matching transcript text and an HTML5 audio tag."
-        ),
-    )
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=api_key) if api_key else None
+    agent_executor = None
+    if llm is not None:
+        agent_executor = create_agent(
+            llm,
+            [search_transcript_segments, extract_audio_clip],
+            system_prompt=(
+                "You are an audio intelligence agent. "
+                "Search transcript segments and use the exact timestamps with extract_audio_clip. "
+                "Return the matching transcript text and an HTML5 audio tag."
+            ),
+        )
 
     class ChatRequest(BaseModel):
         message: str
@@ -177,6 +217,9 @@ def create_app():
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat_endpoint(request: ChatRequest):
+        if llm is None or agent_executor is None:
+            return ChatResponse(response="OpenAI API key is missing. Add OPENAI_API_KEY to your .env file to enable chat responses.")
+
         try:
             result = await agent_executor.ainvoke({
                 "messages": [{"role": "user", "content": request.message}]
