@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+langchain
+langchain-openai
+openai
+qdrant-client
+pydub
+python-dotenv
+httpx[socks]
