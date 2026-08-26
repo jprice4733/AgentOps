@@ -1,4 +1,4 @@
-# WAV Search Agent
+# Audio File Search Agent
 
 A small reusable Python project for transcribing audio files, creating and loading transcript JSON files, indexing transcript segments, and serving a FastAPI chat agent over them.
 
