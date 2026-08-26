@@ -25,10 +25,21 @@ A small reusable Python project for transcribing audio files, creating and loadi
    python3 -m venv .venv
    source .venv/bin/activate
    ```
+   Windows:
+   ```
+   py -m venv .venv                                                       
+   .\.venv\Scripts\Activate.ps1
+   ```
+
 2. Install dependencies:
    ```bash
-   python -m pip install -r requirements.txt
+   python -m pip install -r requirements.txt ()
    ```
+Windows:
+```
+py -m pip install -r requirements.txt ()
+```
+
 3. Install FFmpeg, which pydub uses when extracting audio clips. On Windows,
    run this in PowerShell and then open a new terminal:
    ```powershell
@@ -36,11 +47,15 @@ A small reusable Python project for transcribing audio files, creating and loadi
    ```
    On macOS, use `brew install ffmpeg`; on Debian/Ubuntu, use
    `sudo apt install ffmpeg`.
-4. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.
+4. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.  Note:  need to have you own OPENAI API key
 5. Start the app:
    ```bash
    python main.py
    ```
+   Windows:
+```
+py main.py
+```
 
 By default, extracted clips include 15 seconds of audio before and after the
 matching transcript segment. Set `CLIP_CONTEXT_SECONDS` in `.env` to change
