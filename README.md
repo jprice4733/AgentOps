@@ -20,18 +20,26 @@ A small reusable Python project for loading WAV transcript JSON files, indexing 
 
 ## Setup
 
-1. Create a virtual environment.
+1. From the project root, create a virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
 2. Install dependencies:
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
 3. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.
 4. Start the app:
    ```bash
    python main.py
    ```
+
+> On macOS / zsh, use `python3` for the environment creation step if `python` is not on your PATH.
+> If the venv is already created, you can activate it with:
+> ```bash
+> source .venv/bin/activate
+> ```
 
 ## Data flow
 
