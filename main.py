@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -24,22 +25,13 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 def create_app():
     load_dotenv()
 
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "NO_PROXY",
-        "no_proxy",
-    ]:
-        os.environ.pop(key, None)
-
     AUDIO_DIR = ROOT / "storage" / "audio"
     JSON_DIR = ROOT / "storage" / "json"
     CLIPS_DIR = ROOT / "static" / "clips"
+    QDRANT_DIR = ROOT / "storage" / "qdrant"
     COLLECTION_NAME = "wav_search_agent_segments"
+    EMBEDDING_CACHE_FILE = JSON_DIR / "embedding_cache.json"
+    INDEX_STATE_FILE = QDRANT_DIR / "index_state.json"
     clip_context_seconds = max(0.0, float(os.getenv("CLIP_CONTEXT_SECONDS", "15")))
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,7 +43,6 @@ def create_app():
         print("OPENAI_API_KEY not found. AI features will be disabled until a valid key is added to .env.")
     os.environ["OPENAI_API_KEY"] = api_key or ""
 
-    QDRANT_DIR = ROOT / "storage" / "qdrant"
     QDRANT_DIR.mkdir(parents=True, exist_ok=True)
 
     qdrant_client = QdrantClient(path=str(QDRANT_DIR))
@@ -103,8 +94,12 @@ def create_app():
     @tool
     def extract_audio_clip(file_path: str, start_time: float, end_time: float) -> str:
         """Cut a transcript segment with surrounding context and return the clip URL."""
-        output_filename = f"clip_{Path(file_path).stem}_{start_time:.1f}_{end_time:.1f}.wav"
+        clip_key = f"{Path(file_path).resolve()}|{start_time:.3f}|{end_time:.3f}|{clip_context_seconds:.3f}"
+        output_filename = f"clip_{sha256(clip_key.encode()).hexdigest()[:16]}.wav"
         output_path = CLIPS_DIR / output_filename
+
+        if output_path.exists():
+            return f"/static/clips/{output_filename}"
 
         audio = AudioSegment.from_file(file_path)
         start_ms = max(0, int((start_time - clip_context_seconds) * 1000))
@@ -113,130 +108,94 @@ def create_app():
         clipped.export(output_path, format="wav")
         return f"/static/clips/{output_filename}"
 
-    def load_json_transcripts(embedding_cache=None, batch_size: int = 32) -> list[dict]:
-        """Load JSON transcript files from storage/json and upsert segments with a cache and batch-aware embedding workflow."""
+    def load_json_transcripts(batch_size: int = 64) -> list[dict]:
+        """Index transcripts only when their source files have changed."""
         transcript_files = sorted(JSON_DIR.glob("*.json"))
-        if embedding_cache is None:
+        source_state = [
+            (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+            for path in transcript_files
+            if path != EMBEDDING_CACHE_FILE
+        ]
+        fingerprint = sha256(json.dumps(source_state).encode()).hexdigest()
+
+        try:
+            cached_state = json.loads(INDEX_STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_state = {}
+
+        collection_exists = qdrant_client.collection_exists(COLLECTION_NAME)
+        if collection_exists and cached_state.get("fingerprint") == fingerprint:
+            print("Transcript index is current; skipping re-indexing.")
+            return []
+
+        try:
+            embedding_cache = json.loads(EMBEDDING_CACHE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(embedding_cache, dict):
+                embedding_cache = {}
+        except (OSError, json.JSONDecodeError):
             embedding_cache = {}
 
-        transcripts = []
-        segment_records = []
-
+        transcripts, segments = [], []
         for transcript_path in transcript_files:
+            if transcript_path == EMBEDDING_CACHE_FILE:
+                continue
             try:
                 payload = json.loads(transcript_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"Skipping invalid JSON file {transcript_path}: {exc}")
                 continue
-
             if not isinstance(payload, dict):
                 print(f"Skipping non-object JSON file {transcript_path}")
                 continue
 
-            file_path = payload.get("file_path") or str(AUDIO_DIR / transcript_path.stem)
-            segments = payload.get("segments") or []
-            transcript_record = {
-                "file_path": file_path,
-                "text": payload.get("text", ""),
-                "segments": [],
-            }
-
-            for segment in segments:
-                if not isinstance(segment, dict):
+            record = {"file_path": payload.get("file_path") or str(AUDIO_DIR / transcript_path.stem),
+                      "text": payload.get("text", ""), "segments": []}
+            for item in payload.get("segments") or []:
+                if not isinstance(item, dict) or not str(item.get("text", "")).strip():
                     continue
-                start_time = float(segment.get("start", 0.0) or 0.0)
-                end_time = float(segment.get("end", 0.0) or 0.0)
-                text = str(segment.get("text", "")).strip()
-                if not text:
-                    continue
+                segment = {"file_path": record["file_path"], "start_time": float(item.get("start", 0) or 0),
+                           "end_time": float(item.get("end", 0) or 0), "text": str(item["text"]).strip()}
+                record["segments"].append(segment)
+                segments.append(segment)
+            transcripts.append(record)
 
-                segment_record = {
-                    "file_path": file_path,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "text": text,
-                }
-                transcript_record["segments"].append(segment_record)
-                segment_records.append(segment_record)
+        if embeddings is None:
+            print("No transcript segments were indexed because OpenAI embeddings are unavailable.")
+            return transcripts
 
-            transcripts.append(transcript_record)
+        missing_texts = list({segment["text"] for segment in segments if segment["text"] not in embedding_cache})
+        try:
+            for offset in range(0, len(missing_texts), max(1, batch_size)):
+                texts = missing_texts[offset:offset + max(1, batch_size)]
+                vectors = embeddings.embed_documents(texts)
+                embedding_cache.update(zip(texts, vectors))
+        except Exception as exc:
+            print(f"Skipping Qdrant indexing because embeddings failed: {exc}")
+            return transcripts
 
-        unique_texts = []
-        for segment in segment_records:
-            text = segment["text"]
-            if text in embedding_cache:
-                continue
-            if text not in unique_texts:
-                unique_texts.append(text)
-
-        # Use a batch API when the embedding object supports it so we do not hammer the API one segment at a time.
-        vectors_by_text = {}
-        if unique_texts:
-            try:
-                if hasattr(embeddings, "embed_documents"):
-                    vectors = embeddings.embed_documents(unique_texts[:batch_size] if batch_size else unique_texts)
-                    if isinstance(vectors, list):
-                        for text, vector in zip(unique_texts[:batch_size] if batch_size else unique_texts, vectors):
-                            embedding_cache[text] = vector
-                            vectors_by_text[text] = vector
-                else:
-                    vectors = []
-                    for text in unique_texts:
-                        vector = safe_embed_query(text)
-                        if vector is None:
-                            continue
-                        embedding_cache[text] = vector
-                        vectors_by_text[text] = vector
-            except Exception:
-                vectors = []
-                for text in unique_texts:
-                    vector = safe_embed_query(text)
-                    if vector is None:
-                        continue
-                    embedding_cache[text] = vector
-                    vectors_by_text[text] = vector
-
-        points = []
-        point_id = 1
-        for segment in segment_records:
-            text = segment["text"]
-            vector = embedding_cache.get(text)
-            if vector is None:
-                vector = safe_embed_query(text)
-                if vector is None:
-                    print(f"Skipping embedding for segment in query: {text[:80]}")
-                    continue
-                embedding_cache[text] = vector
-
-            points.append(
-                {
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": segment,
-                }
+        points = [
+            PointStruct(
+                id=int(sha256(f"{item['file_path']}|{item['start_time']}|{item['end_time']}|{item['text']}".encode()).hexdigest()[:15], 16),
+                vector=embedding_cache[item["text"]],
+                payload=item,
             )
-            point_id += 1
+            for item in segments
+        ]
 
-        if points:
-            try:
-                qdrant_client.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=[
-                        PointStruct(
-                            id=point["id"],
-                            vector=point["vector"],
-                            payload=point["payload"],
-                        )
-                        for point in points
-                    ],
-                )
-            except Exception as exc:
-                print(f"Skipping Qdrant indexing due to startup error: {exc}")
-
-        if points:
-            print(f"Indexed {len(points)} segment(s) from {len(transcripts)} JSON transcript(s)")
-        else:
-            print(f"No transcript segments were indexed. Check the transcript JSON files and OpenAI connectivity.")
+        try:
+            if collection_exists:
+                qdrant_client.delete_collection(COLLECTION_NAME)
+            qdrant_client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+            )
+            if points:
+                qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points)
+            EMBEDDING_CACHE_FILE.write_text(json.dumps(embedding_cache), encoding="utf-8")
+            INDEX_STATE_FILE.write_text(json.dumps({"fingerprint": fingerprint}), encoding="utf-8")
+            print(f"Indexed {len(points)} segment(s) from {len(transcripts)} JSON transcript(s).")
+        except Exception as exc:
+            print(f"Skipping Qdrant indexing due to startup error: {exc}")
         return transcripts
 
     load_json_transcripts()
