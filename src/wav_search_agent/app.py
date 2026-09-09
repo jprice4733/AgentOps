@@ -11,7 +11,7 @@ from pydub import AudioSegment
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
-from .config import BASE_DIR, CLIPS_DIR, STATIC_DIR, ensure_directories, get_openai_api_key
+from .config import BASE_DIR, CLIPS_DIR, STATIC_DIR, QDRANT_DIR, ensure_directories, get_openai_api_key
 from .transcripts import load_json_transcripts
 
 
@@ -64,18 +64,17 @@ def create_app():
     # keep the same global references the tools need
     global embeddings, qdrant_client, COLLECTION_NAME
     embeddings = OpenAIEmbeddings()
-    qdrant_client = QdrantClient(":memory:")
+    qdrant_client = QdrantClient(path=str(QDRANT_DIR))
     COLLECTION_NAME = "wav_search_agent_segments"
 
-    if qdrant_client.collection_exists(COLLECTION_NAME):
-        qdrant_client.delete_collection(COLLECTION_NAME)
+    if not qdrant_client.collection_exists(COLLECTION_NAME):
+        qdrant_client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+        )
 
-    qdrant_client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-    )
-
-    load_json_transcripts(embeddings, qdrant_client, COLLECTION_NAME)
+    embedding_cache = {}
+    load_json_transcripts(embeddings, qdrant_client, COLLECTION_NAME, embedding_cache=embedding_cache, batch_size=32)
 
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
     tools = [search_transcript_segments, extract_audio_clip]

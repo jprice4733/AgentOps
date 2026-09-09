@@ -51,17 +51,18 @@ def create_app():
         print("OPENAI_API_KEY not found. AI features will be disabled until a valid key is added to .env.")
     os.environ["OPENAI_API_KEY"] = api_key or ""
 
-    qdrant_client = QdrantClient(":memory:")
+    QDRANT_DIR = ROOT / "storage" / "qdrant"
+    QDRANT_DIR.mkdir(parents=True, exist_ok=True)
+
+    qdrant_client = QdrantClient(path=str(QDRANT_DIR))
     embeddings = OpenAIEmbeddings(api_key=api_key) if api_key else None
 
     try:
-        if qdrant_client.collection_exists(COLLECTION_NAME):
-            qdrant_client.delete_collection(COLLECTION_NAME)
-
-        qdrant_client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-        )
+        if not qdrant_client.collection_exists(COLLECTION_NAME):
+            qdrant_client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+            )
     except Exception as exc:
         print(f"Qdrant collection setup failed during startup: {exc}")
 
@@ -112,12 +113,14 @@ def create_app():
         clipped.export(output_path, format="wav")
         return f"/static/clips/{output_filename}"
 
-    def load_json_transcripts() -> list[dict]:
-        """Load JSON transcript files from storage/json and index their segments."""
+    def load_json_transcripts(embedding_cache=None, batch_size: int = 32) -> list[dict]:
+        """Load JSON transcript files from storage/json and upsert segments with a cache and batch-aware embedding workflow."""
         transcript_files = sorted(JSON_DIR.glob("*.json"))
+        if embedding_cache is None:
+            embedding_cache = {}
+
         transcripts = []
-        points = []
-        point_id = 1
+        segment_records = []
 
         for transcript_path in transcript_files:
             try:
@@ -154,22 +157,65 @@ def create_app():
                     "text": text,
                 }
                 transcript_record["segments"].append(segment_record)
-
-                vector = safe_embed_query(text)
-                if vector is None:
-                    print(f"Skipping embedding for segment in {transcript_path.name}: OpenAI is unavailable.")
-                    continue
-
-                points.append(
-                    {
-                        "id": point_id,
-                        "vector": vector,
-                        "payload": segment_record,
-                    }
-                )
-                point_id += 1
+                segment_records.append(segment_record)
 
             transcripts.append(transcript_record)
+
+        unique_texts = []
+        for segment in segment_records:
+            text = segment["text"]
+            if text in embedding_cache:
+                continue
+            if text not in unique_texts:
+                unique_texts.append(text)
+
+        # Use a batch API when the embedding object supports it so we do not hammer the API one segment at a time.
+        vectors_by_text = {}
+        if unique_texts:
+            try:
+                if hasattr(embeddings, "embed_documents"):
+                    vectors = embeddings.embed_documents(unique_texts[:batch_size] if batch_size else unique_texts)
+                    if isinstance(vectors, list):
+                        for text, vector in zip(unique_texts[:batch_size] if batch_size else unique_texts, vectors):
+                            embedding_cache[text] = vector
+                            vectors_by_text[text] = vector
+                else:
+                    vectors = []
+                    for text in unique_texts:
+                        vector = safe_embed_query(text)
+                        if vector is None:
+                            continue
+                        embedding_cache[text] = vector
+                        vectors_by_text[text] = vector
+            except Exception:
+                vectors = []
+                for text in unique_texts:
+                    vector = safe_embed_query(text)
+                    if vector is None:
+                        continue
+                    embedding_cache[text] = vector
+                    vectors_by_text[text] = vector
+
+        points = []
+        point_id = 1
+        for segment in segment_records:
+            text = segment["text"]
+            vector = embedding_cache.get(text)
+            if vector is None:
+                vector = safe_embed_query(text)
+                if vector is None:
+                    print(f"Skipping embedding for segment in query: {text[:80]}")
+                    continue
+                embedding_cache[text] = vector
+
+            points.append(
+                {
+                    "id": point_id,
+                    "vector": vector,
+                    "payload": segment,
+                }
+            )
+            point_id += 1
 
         if points:
             try:
