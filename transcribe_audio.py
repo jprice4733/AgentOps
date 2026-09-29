@@ -1,112 +1,49 @@
-from __future__ import annotations
-
-import json
+"""Read recordings from S3 and save transcripts in S3."""
+import argparse
 import os
-from pathlib import Path
-
+from pathlib import PurePosixPath
 from dotenv import load_dotenv
 from openai import OpenAI
-
-load_dotenv()
-
-AUDIO_DIR = Path("storage/audio")
-JSON_DIR = Path("storage/json")
-LEGACY_TRANSCRIPTS_PATH = Path("storage/transcripts.json")
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm"}
+from s3_audio import ROOT
+from wav_search_agent.s3_store import S3Store
 
 
-def save_existing_transcript(audio_path: Path, output_path: Path) -> bool:
-    if not LEGACY_TRANSCRIPTS_PATH.exists():
+def transcribe_object(store, client, item):
+    if store.transcript(item) is not None:
         return False
-
-    try:
-        transcripts = json.loads(LEGACY_TRANSCRIPTS_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-
-    if not isinstance(transcripts, list):
-        return False
-
-    for transcript in transcripts:
-        file_path = str(transcript.get("file_path", "")).strip()
-        if file_path == str(audio_path) or Path(file_path).name == audio_path.name:
-            output_path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-            print(f"Saved existing transcript for {audio_path.name} to {output_path}")
-            return True
-
-    return False
-
-
-def main() -> None:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not found. Add it to the .env file before running transcription.")
-
-    for proxy_var in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "HTTPS_PROXY",
-        "GRPC_PROXY",
-        "grpc_proxy",
-        "FTP_PROXY",
-        "ftp_proxy",
-    ):
-        os.environ.pop(proxy_var, None)
-
-    JSON_DIR.mkdir(parents=True, exist_ok=True)
-    client = OpenAI(api_key=api_key)
-
-    audio_files = sorted(
-        path for path in AUDIO_DIR.rglob("*")
-        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+    kwargs = {"IfMatch": item["ETag"]} if item.get("ETag") else {}
+    audio = store.read(item["Key"], **kwargs)
+    transcription = client.audio.transcriptions.create(
+        model="whisper-1", file=(PurePosixPath(item["Key"]).name, audio),
+        response_format="verbose_json", timestamp_granularities=["segment"],
     )
+    store.save_transcript(item, {
+        "file_path": store.uri(item["Key"]), "text": transcription.text,
+        "segments": [{"id": index, "start": float(segment.start),
+                      "end": float(segment.end), "text": segment.text.strip()}
+                     for index, segment in enumerate(transcription.segments or [])],
+    })
+    return True
 
-    if not audio_files:
-        print(f"No supported audio files found in {AUDIO_DIR}")
-        return
 
-    for audio_path in audio_files:
-        output_path = JSON_DIR / f"{audio_path.stem}.json"
-        if output_path.exists():
-            print(f"Skipping {audio_path.name}: {output_path.name} already exists")
-            continue
-
-        if save_existing_transcript(audio_path, output_path):
-            continue
-
-        with audio_path.open("rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-            )
-
-        payload = {
-            "file_name": audio_path.name,
-            "file_path": str(audio_path),
-            "text": transcription.text,
-            "segments": [
-                {
-                    "id": idx,
-                    "start": float(segment.start),
-                    "end": float(segment.end),
-                    "text": segment.text.strip(),
-                }
-                for idx, segment in enumerate(transcription.segments or [])
-            ],
-        }
-
-        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"Saved {output_path}")
-
-    print(f"Finished. Transcripts are in {JSON_DIR}")
+def main():
+    load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile")
+    parser.add_argument("--uri")
+    parser.add_argument("--limit", type=int)
+    args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("Set OPENAI_API_KEY in .env before transcribing.")
+    store, client = S3Store(args.uri, args.profile), OpenAI()
+    for count, item in enumerate(store.audio_objects(), 1):
+        created = transcribe_object(store, client, item)
+        print(f"{'Transcribed' if created else 'Already transcribed'}: {store.uri(item['Key'])}")
+        if args.limit is not None and count >= args.limit:
+            break
 
 
 if __name__ == "__main__":
     main()
-

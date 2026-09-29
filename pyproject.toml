@@ -18,6 +18,7 @@ dependencies = [
   "pydub",
   "python-dotenv",
   "httpx[socks]",
+  "boto3",
 ]
 
 [tool.setuptools]

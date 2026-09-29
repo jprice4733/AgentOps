@@ -1,141 +1,61 @@
-import json
+from unittest.mock import Mock
+from io import BytesIO
 
 from fastapi.testclient import TestClient
+from pydub import AudioSegment
+import main
 
 
-def test_load_json_transcripts_accepts_embedding_cache_and_batching(monkeypatch, tmp_path):
-    import wav_search_agent.transcripts as transcripts_module
-
-    json_dir = tmp_path / "json"
-    audio_dir = tmp_path / "audio"
-    json_dir.mkdir(parents=True)
-    audio_dir.mkdir(parents=True)
-
-    sample_json = json_dir / "sample.json"
-    sample_json.write_text(json.dumps({
-        "file_path": str(audio_dir / "sample.wav"),
-        "text": "A transcript",
-        "segments": [
-            {"start": 0.0, "end": 1.0, "text": "hello world"},
-            {"start": 1.0, "end": 2.0, "text": "hello world"},
-        ],
-    }), encoding="utf-8")
-
-    monkeypatch.setattr(transcripts_module, "JSON_DIR", json_dir)
-    monkeypatch.setattr(transcripts_module, "AUDIO_DIR", audio_dir)
-
-    class DummyEmbeddings:
-        def __init__(self):
-            self.calls = []
-
-        def embed_documents(self, texts):
-            self.calls.append(list(texts))
-            return [[0.1, 0.2, 0.3] for _ in texts]
-
-    class DummyQdrantClient:
-        def __init__(self):
-            self.points = None
-
-        def upsert(self, collection_name, points):
-            self.collection_name = collection_name
-            self.points = points
-
-    embeddings = DummyEmbeddings()
-    qdrant = DummyQdrantClient()
-    cache = {}
-
-    transcripts_module.load_json_transcripts(
-        embeddings,
-        qdrant,
-        "test_collection",
-        embedding_cache=cache,
-        batch_size=10,
-    )
-
-    assert len(embeddings.calls) == 1
-    assert embeddings.calls[0] == ["hello world"]
-    assert len(qdrant.points) == 2
-    assert len(cache) == 1
-    assert cache["hello world"] == [0.1, 0.2, 0.3]
-
-
-def test_create_app_handles_embedding_failure(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-
-    import main
-
-    class DummyEmbeddings:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def embed_query(self, text):
-            raise RuntimeError("Connection error")
-
-    monkeypatch.setattr(main, "OpenAIEmbeddings", DummyEmbeddings)
-
-    app = main.create_app()
-    client = TestClient(app)
-    response = client.get("/")
-
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert "<html" in response.text.lower()
-    assert app.title == "WAV Chat Agent"
-
-
-def test_main_indexes_all_embedding_batches_and_skips_unchanged_sources(monkeypatch, tmp_path):
-    import main
-
-    transcript_dir = tmp_path / "storage" / "json"
-    transcript_dir.mkdir(parents=True)
-    segments = [
-        {"start": index, "end": index + 1, "text": f"segment {index}"}
-        for index in range(65)
-    ]
-    (transcript_dir / "sample.json").write_text(json.dumps({
-        "file_path": str(tmp_path / "storage" / "audio" / "sample.wav"),
-        "segments": segments,
-    }), encoding="utf-8")
-
-    class DummyEmbeddings:
-        calls = []
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def embed_documents(self, texts):
-            self.calls.append(list(texts))
-            return [[0.1] * 1536 for _ in texts]
-
-    class DummyQdrant:
-        exists = False
-        points = []
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def collection_exists(self, name):
-            return type(self).exists
-
-        def create_collection(self, **kwargs):
-            type(self).exists = True
-
-        def delete_collection(self, name):
-            type(self).exists = False
-
-        def upsert(self, **kwargs):
-            type(self).points = kwargs["points"]
-
+def configure(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(main, "ROOT", tmp_path)
-    monkeypatch.setattr(main, "OpenAIEmbeddings", DummyEmbeddings)
-    monkeypatch.setattr(main, "QdrantClient", DummyQdrant)
-    monkeypatch.setattr(main, "ChatOpenAI", lambda **kwargs: object())
-    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: object())
+    store = Mock()
+    store.audio_objects.return_value = [{"Key": "calls/a.wav"}]
+    store.transcript.return_value = {
+        "file_path": "s3://bucket/calls/a.wav",
+        "segments": [{"start": 0, "end": 1, "text": "hello"}],
+    }
+    monkeypatch.setattr(main, "S3Store", lambda: store)
+    embeddings = Mock()
+    embeddings.embed_documents.return_value = [[0.1] * 1536]
+    monkeypatch.setattr(main, "OpenAIEmbeddings", lambda **kwargs: embeddings)
+    monkeypatch.setattr(main, "ChatOpenAI", lambda **kwargs: Mock())
+    captured = {}
+    def agent(llm, tools, **kwargs):
+        captured["tools"] = tools
+        return Mock()
+    monkeypatch.setattr(main, "create_agent", agent)
+    return store, embeddings, captured
 
-    main.create_app()
-    assert [len(batch) for batch in DummyEmbeddings.calls] == [64, 1]
-    assert len(DummyQdrant.points) == 65
 
-    main.create_app()
-    assert [len(batch) for batch in DummyEmbeddings.calls] == [64, 1]
+def test_s3_index_and_persisted_clip(monkeypatch, tmp_path):
+    store, embeddings, captured = configure(monkeypatch, tmp_path)
+    app = main.create_app()
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    embeddings.embed_documents.assert_called_once_with(["hello"])
+    wav = BytesIO()
+    AudioSegment.silent(duration=2000).export(wav, format="wav")
+    store.audio_stream.return_value = BytesIO(wav.getvalue())
+    url = captured["tools"][1].invoke({"file_path": "s3://bucket/calls/a.wav", "start_time": 0, "end_time": 1})
+    store.save_clip.assert_called_once()
+    assert store.save_clip.call_args.args[1].startswith(b"RIFF")
+    store.clip_url.return_value = "https://bucket.s3.amazonaws.com/clip?signature=test"
+    response = client.get(url, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == store.clip_url.return_value
+    store.clip_url.side_effect = ValueError("Invalid clip name")
+    assert client.get("/api/clips/unknown.wav").status_code == 404
+    assert not list(tmp_path.iterdir())
+
+
+def test_s3_failure_has_no_local_fallback(monkeypatch, tmp_path):
+    store, embeddings, _ = configure(monkeypatch, tmp_path)
+    local = tmp_path / "storage" / "json"
+    local.mkdir(parents=True)
+    (local / "old.json").write_text('{"segments": [{"text": "local"}]}')
+    store.audio_objects.side_effect = RuntimeError("No AWS credentials")
+    app = main.create_app()
+    embeddings.embed_documents.assert_not_called()
+    response = TestClient(app).post("/api/chat", json={"message": "search"})
+    assert "No AWS credentials" in response.json()["response"]
