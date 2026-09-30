@@ -1,113 +1,204 @@
 # Audio File Search Agent
 
-A Python app for transcribing S3 audio, storing transcripts in S3, and searching them through a FastAPI chat agent.
+A FastAPI chat app that transcribes recordings from S3, searches call transcripts,
+and creates playable audio clips. Source audio, transcript JSON, and generated
+clips reside in S3. Local recordings and transcript files are ignored.
 
 ## Features
 
-- Reads audio and transcript JSON from S3
-- Searches transcript segments with an in-memory Qdrant index
-- Extracts and serves clips on demand
-- Uses no persistent local audio, transcript, or index files
+- Automatically creates missing transcripts and full-recording WAV clips at startup.
+- Reuses existing outputs for unchanged recordings and retries missing outputs.
+- Searches transcripts by topic, exact phrase, or person name.
+- Offers first-name-only mentions as possible matches, with identity explicitly unconfirmed.
+- Reads call transcripts with timestamps for summaries and excerpt selection.
+- Remembers the selected call through the current browser conversation.
+- Stores clips in S3 and plays them through signed URLs.
+- Reports incomplete transcript coverage rather than implying all calls were searched.
 
 ## Setup
 
-1. From the project root, create a virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-   Windows:
-   ```
-   py -m venv .venv                                                       
-   .\.venv\Scripts\Activate.ps1
-   ```
-
-2. Install dependencies:
-   ```bash
-   python -m pip install -r requirements.txt
-   ```
-Windows:
-```
-py -m pip install -r requirements.txt
-```
-
-3. Install FFmpeg, which pydub uses when extracting audio clips. On Windows,
-   run this in PowerShell and then open a new terminal:
-   ```powershell
-   winget install --id Gyan.FFmpeg.Essentials --exact
-   ```
-   On macOS, use `brew install ffmpeg`; on Debian/Ubuntu, use
-   `sudo apt install ffmpeg`.
-4. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.  Note:  need to have you own OPENAI API key
-5. Start the app:
-   ```bash
-   python main.py
-   ```
-   Windows:
-```
-py main.py
-```
-
-By default, extracted clips include 15 seconds of audio before and after the
-matching transcript segment. Set `CLIP_CONTEXT_SECONDS` in `.env` to change
-that amount, for example `CLIP_CONTEXT_SECONDS=30` for 30 seconds on each
-side. Clip boundaries are automatically limited to the source audio.
-
-> On macOS / zsh, use `python3` for the environment creation step if `python` is not on your PATH.
-> If the venv is already created, you can activate it with:
-> ```bash
-> source .venv/bin/activate
-> ```
-
-## S3 workflow
-
-On startup the app scans all supported source recordings and creates any missing
-transcripts and full-recording WAV clips before indexing. Transcription sends audio
-to OpenAI using the configured API key; outputs stay in the configured S3 JSON and
-clips folders. Startup can take longer while processing new recordings.
-
-Existing outputs for the same source version are reused. Transcript and clip
-creation are checked separately, and failures are logged while other recordings
-continue processing. Rerun to retry failed outputs. Set `S3_AUTO_PROCESS=false` in
-`.env` to disable startup processing. Run `python transcribe_audio.py` to sync both
-output types manually (`--limit N` limits the number of source recordings checked).
-The app scans on each startup, not continuously; restart after adding recordings.
-Full-recording clips use source-version-based filenames; requested excerpts remain
-separate clips. Previously generated excerpts do not replace the full-recording clip.
-
-All data resides in `denverit-demo-bucket`:
-
-- Source audio: `voip-telecom-system/`
-- Transcript JSON: `voip-telecom-system/json/`
-- Generated WAV clips: `voip-telecom-system/clips/`
-
-The app ignores local recordings, local JSON transcripts, and old local indexes.
-It builds its search index in memory and uploads generated clips to S3.
-Playback redirects to a fresh one-hour presigned S3 URL. Clips persist across
-app restarts; restarting rebuilds embeddings. Audio is read
-into memory on demand; large recordings require sufficient RAM. FFmpeg may use
-its own temporary processing files for compressed formats.
-
-Set `AWS_PROFILE` in `.env` to your AWS profile, or use standard AWS environment
-credentials / an IAM role. For SSO, run `aws sso login --profile YOUR_PROFILE`.
-Set `S3_AUDIO_URI` to change the source bucket/prefix. `S3_JSON_PREFIX` and
-`S3_CLIPS_PREFIX` configure output prefixes within that same bucket.
+Run commands from the project root. On Windows, use the project interpreter directly
+so the app uses the installed dependencies:
 
 ```powershell
-python s3_audio.py --limit 10
-python transcribe_audio.py --limit 1
-python main.py
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Transcription sends S3 audio to OpenAI and writes JSON to `voip-telecom-system/json/` in S3. Omit `--limit` to process all recordings. Unchanged objects with
-existing transcripts are skipped; changed objects receive new transcript keys.
-Only transcripts for current S3 recordings are indexed. Restart the app after
-transcription. No existing local files are deleted or uploaded.
+On macOS or Linux:
 
-AWS permissions: `s3:ListBucket` on the bucket, `s3:GetObject` for the configured
-audio prefix and both output prefixes, and `s3:PutObject` on `voip-telecom-system/json/*` and
-`voip-telecom-system/clips/*`. Existing objects under the former `_transcripts/` prefix are not
-moved automatically; new transcription runs use the configured JSON prefix.
-Customer-managed KMS encryption may also require key permissions.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-AWS references: [listing objects](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/paginator/ListObjectsV2.html).
+Install FFmpeg for audio decoding. On Windows:
+
+```powershell
+winget install --id Gyan.FFmpeg.Essentials --exact
+```
+
+Open a new terminal after installation. On macOS use `brew install ffmpeg`; on
+Debian/Ubuntu use `sudo apt install ffmpeg`.
+
+If `.env` does not already exist, copy `.env.example` to `.env` and configure:
+
+```dotenv
+OPENAI_API_KEY=your_openai_api_key
+S3_AUDIO_URI=s3://denverit-demo-bucket/voip-telecom-system/
+S3_JSON_PREFIX=voip-telecom-system/json/
+S3_CLIPS_PREFIX=voip-telecom-system/clips/
+S3_AUTO_PROCESS=true
+CLIP_CONTEXT_SECONDS=15
+AWS_DEFAULT_REGION=your_bucket_region
+```
+
+Use an existing AWS profile:
+
+```dotenv
+AWS_PROFILE=your_profile_name
+```
+
+For SSO profiles, sign in with `aws sso login --profile YOUR_PROFILE`. Alternatively,
+configure credentials locally in `.env`:
+
+```dotenv
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+# Required only when using temporary credentials:
+AWS_SESSION_TOKEN=your_session_token
+```
+
+Choose the credential method appropriate to your AWS setup. Keep secrets out of
+source control; `.env` is ignored by Git.
+
+## Start the app
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+Open **http://localhost:8000/** or **http://127.0.0.1:8000/**. The server listens
+on `0.0.0.0`, but that address is not the browser destination. Leave the terminal
+running. To restart, press Ctrl+C and run the command again.
+
+In VS Code, use **Python: Select Interpreter** and select
+`.venv\Scripts\python.exe` so the Run button uses the project environment.
+
+## S3 storage and processing
+
+| Content | Location |
+| --- | --- |
+| Source recordings | `s3://denverit-demo-bucket/voip-telecom-system/` |
+| Transcript JSON | `s3://denverit-demo-bucket/voip-telecom-system/json/` |
+| WAV clips | `s3://denverit-demo-bucket/voip-telecom-system/clips/` |
+
+Output prefixes are relative to the bucket, not to the source audio folder.
+The scanner excludes both output folders from source recordings. Supported source
+extensions are `.wav`, `.mp3`, `.m4a`, `.mp4`, `.mpeg`, `.mpga`, and `.webm`.
+
+With `S3_AUTO_PROCESS=true` (the default), startup:
+
+1. Lists source recordings in S3.
+2. Sends recordings lacking a current transcript to OpenAI for transcription and
+   saves timestamped JSON in the configured JSON folder.
+3. Creates a full-recording WAV clip for each source version lacking that output.
+4. Loads current transcripts and builds an in-memory Qdrant search index using
+   OpenAI embeddings.
+
+Transcripts and full-recording clips use filenames derived from source metadata.
+Changed source metadata results in new output filenames; older outputs are retained.
+Transcript and clip existence are checked independently. Individual processing
+failures are logged while other outputs continue. Rerun to retry missing outputs.
+Previously requested excerpts do not replace the full-recording clip.
+
+Processing sends audio to OpenAI and incurs API usage. Embeddings are rebuilt at
+startup. Set `S3_AUTO_PROCESS=false` to disable automatic output creation; existing
+transcripts are still loaded and indexed. The app scans at startup, not continuously.
+Restart after adding recordings or running manual processing.
+
+Audio is processed in memory, with no persistent local media or index storage.
+Large recordings require sufficient memory and must fit the transcription service's
+upload limits; automatic splitting is not implemented. FFmpeg may use temporary
+processing files. Existing local files are not deleted or uploaded.
+
+## Manual commands
+
+List up to ten source recordings:
+
+```powershell
+.\.venv\Scripts\python.exe s3_audio.py --limit 10
+```
+
+Create all missing transcripts and full-recording clips:
+
+```powershell
+.\.venv\Scripts\python.exe transcribe_audio.py
+```
+
+Both commands accept `--profile YOUR_PROFILE`, `--uri s3://bucket/prefix/`, and
+`--limit N`. The limit counts source recordings checked, including recordings
+whose outputs already exist. The processing command exits with a failure status
+if any output failed. Restart the app afterward to refresh its index.
+
+## Chat examples
+
+- ?Which calls are available??
+- ?What was call 20260929_153431_I_3036413833_103.wav about??
+- ?Play an audio clip from call 20260929_153431_I_3036413833_103.wav.?
+- ?Give me clips where Doug Miers is mentioned.?
+- After selecting a call: ?Play the part where they discuss September 29.?
+
+A named playback request without a topic or timestamps defaults to the full call.
+Requested excerpts include 15 seconds of surrounding context by default, controlled
+by `CLIP_CONTEXT_SECONDS` and limited to the recording boundaries. Short recordings
+can therefore produce clips containing the entire call.
+
+Name searches distinguish exact full-name matches from first-name-only candidates.
+For example, ?Doug?s cell? can be offered as a possible match for ?Doug Miers,? but
+it does not confirm the surname or identity. The app does not guarantee phonetic
+or alternate-spelling matching. Missing transcripts are excluded from search and
+reported in coverage notices.
+
+Chat history is kept in the browser page and the most recent 20 messages are sent
+with each request. Refreshing the page clears that history. Generated clips remain
+in S3; the playback endpoint creates a fresh signed URL with a requested one-hour
+lifetime, subject to the signing credentials remaining valid.
+
+## AWS permissions
+
+The configured AWS identity needs:
+
+- `s3:ListBucket` on `denverit-demo-bucket`.
+- `s3:GetObject` for source audio and the JSON and clip prefixes, including checks
+  for existing clip objects.
+- `s3:PutObject` on `voip-telecom-system/json/*` and
+  `voip-telecom-system/clips/*`.
+
+Customer-managed KMS encryption may require additional key permissions. Objects
+under former output prefixes are not migrated automatically.
+
+## Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| `No module named dotenv` | Run with `.\.venv\Scripts\python.exe` and install `requirements.txt` in that environment. |
+| `ERR_ADDRESS_INVALID` at `0.0.0.0` | Open `http://localhost:8000/`. |
+| AWS credentials unavailable or expired | Configure `.env` or your AWS profile; refresh temporary credentials or SSO login. |
+| Missing transcripts or incomplete search coverage | Check startup processing errors, credentials, permissions, and OpenAI access; rerun processing and restart. |
+| A name is not found | Inspect coverage and transcript wording; a partial name is not a confirmed full-name match. |
+| Clip generation or playback fails | Check FFmpeg, S3 read/write permissions, and valid AWS signing credentials. |
+| Code changes do not appear | Restart the app and refresh the browser. |
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pytest
+.\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+The test suite uses mocked external services. It covers missing-output processing,
+S3 paths and error handling, clip generation, transcript coverage, name matching,
+and conversation history. Passing these tests does not verify live AWS or OpenAI
+credentials.
