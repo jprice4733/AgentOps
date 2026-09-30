@@ -61,6 +61,20 @@ side. Clip boundaries are automatically limited to the source audio.
 
 ## S3 workflow
 
+On startup the app scans all supported source recordings and creates any missing
+transcripts and full-recording WAV clips before indexing. Transcription sends audio
+to OpenAI using the configured API key; outputs stay in the configured S3 JSON and
+clips folders. Startup can take longer while processing new recordings.
+
+Existing outputs for the same source version are reused. Transcript and clip
+creation are checked separately, and failures are logged while other recordings
+continue processing. Rerun to retry failed outputs. Set `S3_AUTO_PROCESS=false` in
+`.env` to disable startup processing. Run `python transcribe_audio.py` to sync both
+output types manually (`--limit N` limits the number of source recordings checked).
+The app scans on each startup, not continuously; restart after adding recordings.
+Full-recording clips use source-version-based filenames; requested excerpts remain
+separate clips. Previously generated excerpts do not replace the full-recording clip.
+
 All data resides in `denverit-demo-bucket`:
 
 - Source audio: `voip-telecom-system/`

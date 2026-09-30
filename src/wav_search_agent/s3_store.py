@@ -88,6 +88,19 @@ class S3Store:
             raise ValueError("Invalid clip name.")
         return self.clips_prefix + name
 
+    def recording_clip_name(self, item):
+        # Same source fingerprint as the transcript; replaced recordings get new outputs.
+        return self.transcript_key(item).rsplit("/", 1)[-1].removesuffix(".json") + ".wav"
+
+    def clip_exists(self, name):
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=self.clip_key(name))
+            return True
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("NoSuchKey", "404", "NotFound"):
+                return False
+            raise
+
     def save_clip(self, name, data):
         self.client.put_object(Bucket=self.bucket, Key=self.clip_key(name),
                                Body=data, ContentType="audio/wav")

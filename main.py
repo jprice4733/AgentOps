@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import re
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -15,6 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from io import BytesIO
 from wav_search_agent.s3_store import S3Store
+from wav_search_agent.processing import sync_outputs
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -32,6 +34,11 @@ def create_app():
     clip_context_seconds = max(0.0, float(os.getenv("CLIP_CONTEXT_SECONDS", "15")))
     transcripts = {}
     available_calls = set()
+    segment_records = []
+
+    def search_coverage():
+        return {"recordings": len(available_calls), "transcribed": len(transcripts),
+                "missing_transcripts": sorted(available_calls - transcripts.keys())}
 
     def resolve_call(file_path):
         if file_path in available_calls:
@@ -91,11 +98,43 @@ def create_app():
             return None
 
     @tool
+    def search_name_mentions(name: str) -> str:
+        """Find exact full-name mentions and possible first-name-only mentions across calls.
+
+        Possible matches do not confirm the person's identity. Return their clips
+        with that caveat, preserving the original transcript wording.
+        """
+        words = re.findall(r"\w+", name.casefold())
+        if not words:
+            return json.dumps({"matches": [], "coverage": search_coverage()})
+        exact, possible = [], []
+        for segment in segment_records:
+            tokens = re.findall(r"\w+", segment["text"].casefold())
+            full_match = any(tokens[index:index + len(words)] == words
+                             for index in range(len(tokens)))
+            if full_match:
+                exact.append({**segment, "match_type": "exact_name"})
+            elif len(words) > 1 and words[0] in tokens:
+                possible.append({**segment, "match_type": "first_name_only",
+                                 "caveat": "Surname not confirmed; may be a different person."})
+        matches = exact + possible
+        return json.dumps({"matches": matches[:50], "truncated": len(matches) > 50,
+                           "coverage": search_coverage()})
+
+    @tool
     def search_transcript_segments(topic_query: str) -> str:
-        """Search transcript segments by semantic similarity."""
+        """Search all calls for a name or topic. Returns matches and transcript coverage."""
+        normalize = lambda value: " ".join(re.findall(r"\w+", value.casefold()))
+        query = normalize(topic_query)
+        exact = [segment for segment in segment_records
+                 if query and f" {query} " in f" {normalize(segment['text'])} "]
+        if exact:
+            return json.dumps({"matches": exact[:50], "match_type": "literal",
+                               "truncated": len(exact) > 50, "coverage": search_coverage()})
         query_vector = safe_embed_query(topic_query)
         if query_vector is None:
-            return "OpenAI embeddings are unavailable right now. Check your API key and network access."
+            return json.dumps({"matches": [], "error": "Semantic search unavailable.",
+                               "coverage": search_coverage()})
         search_results = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -103,7 +142,7 @@ def create_app():
         ).points
 
         if not search_results:
-            return "No matching transcript segments found."
+            return json.dumps({"matches": [], "coverage": search_coverage()})
 
         results = []
         for hit in search_results:
@@ -113,7 +152,8 @@ def create_app():
                 "end_time": hit.payload["end_time"],
                 "file_path": hit.payload["file_path"],
             })
-        return json.dumps(results)
+        return json.dumps({"matches": results, "match_type": "semantic_candidates",
+                           "coverage": search_coverage()})
 
     @tool
     def extract_audio_clip(file_path: str, start_time: float = 0, end_time: float | None = None) -> str:
@@ -150,6 +190,7 @@ def create_app():
                                  "start_time": float(segment.get("start", 0)),
                                  "end_time": float(segment.get("end", 0)),
                                  "text": str(segment["text"]).strip()})
+        segment_records.extend(segments)
         if embeddings is None:
             return
         points = []
@@ -164,7 +205,10 @@ def create_app():
 
     app = FastAPI(title="WAV Chat Agent")
     app.state.source_error = None
+    app.state.processing_report = None
     try:
+        if os.getenv("S3_AUTO_PROCESS", "true").lower() in ("true", "1", "yes"):
+            app.state.processing_report = sync_outputs(store)
         load_s3_transcripts()
     except Exception as exc:
         app.state.source_error = str(exc)
@@ -183,9 +227,18 @@ def create_app():
     if llm is not None:
         agent_executor = create_agent(
             llm,
-            [search_transcript_segments, extract_audio_clip, list_calls, read_call_transcript],
+            [search_transcript_segments, extract_audio_clip, list_calls, read_call_transcript, search_name_mentions],
             system_prompt=(
                 "You are an audio intelligence agent. "
+                "For requests for clips mentioning a person, first use search_name_mentions with "
+                "the person's name across all calls, then extract the returned clips. "
+                "Include first_name_only candidates as possible matches, explicitly stating that "
+                "the surname and identity are unconfirmed and quoting the actual wording. "
+                "Do not discard these possible matches or ask permission to play them when clips "
+                "were already requested. If needed use search_transcript_segments for further candidates. Semantic candidates "
+                "are not proof of a name match; check the actual transcript text. "
+                "Always disclose missing_transcripts from search coverage. When coverage is "
+                "incomplete, say no match in the available transcripts, never no references in all calls. "
                 "Use conversation history to retain the call the user selected. "
                 "When asked to play a named call without timestamps or a topic, immediately "
                 "call extract_audio_clip with its filename and omit timestamps to play the whole call; "
@@ -236,6 +289,13 @@ def create_app():
             response_text = final_message.content
             if not isinstance(response_text, str):
                 response_text = str(response_text)
+            missing = search_coverage()["missing_transcripts"]
+            if missing:
+                response_text += (
+                    f"<p>Search coverage: {len(transcripts)} of {len(available_calls)} recordings "
+                    "have current transcripts. Untranscribed recordings were not searched. "
+                    "Transcribe missing recordings and restart the app to include them.</p>"
+                )
             return ChatResponse(response=response_text)
         except Exception as error:
             return ChatResponse(response=f"Chat request failed: {error}")

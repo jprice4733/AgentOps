@@ -8,6 +8,7 @@ import main
 
 def configure(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("S3_AUTO_PROCESS", "false")
     monkeypatch.setattr(main, "ROOT", tmp_path)
     store = Mock()
     store.bucket = "bucket"
@@ -111,3 +112,46 @@ def test_followup_passes_history_without_sharing_between_requests(monkeypatch, t
         {"role": "user", "content": "where discuss september 29"}]
     client.post("/api/chat", json={"message": "hello"})
     assert len(agent.ainvoke.call_args.args[0]["messages"]) == 1
+
+
+def test_name_search_prioritizes_literal_match_and_reports_missing_calls(monkeypatch, tmp_path):
+    import json
+    store, embeddings, captured = configure(monkeypatch, tmp_path)
+    store.audio_objects.return_value = [{"Key": "calls/a.wav"}, {"Key": "calls/b.wav"}]
+    store.transcript.side_effect = [
+        {"file_path": "s3://bucket/calls/a.wav", "segments": [
+            {"start": 2, "end": 5, "text": "Please contact Doug Miers tomorrow."}]}, None]
+    main.create_app()
+    tools = {tool.name: tool for tool in captured["tools"]}
+    result = json.loads(tools["search_transcript_segments"].invoke({"topic_query": "doug miers"}))
+    assert result["matches"][0]["start_time"] == 2
+    assert result["match_type"] == "literal"
+    assert result["coverage"]["missing_transcripts"] == ["s3://bucket/calls/b.wav"]
+    embeddings.embed_query.assert_not_called()
+
+
+def test_startup_syncs_before_loading_transcripts(monkeypatch, tmp_path):
+    store, _, _ = configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("S3_AUTO_PROCESS", "true")
+    events = []
+    monkeypatch.setattr(main, "sync_outputs", lambda source: events.append("sync") or {})
+    payload = store.transcript.return_value
+    store.transcript.side_effect = lambda item: events.append("load") or payload
+    main.create_app()
+    assert events == ["sync", "load"]
+
+
+def test_name_search_labels_partial_mentions_without_claiming_identity(monkeypatch, tmp_path):
+    import json
+    store, _, captured = configure(monkeypatch, tmp_path)
+    store.transcript.return_value["segments"] = [
+        {"start": 0, "end": 2, "text": "Doug's cell called."},
+        {"start": 2, "end": 4, "text": "Doug Miers called."},
+        {"start": 4, "end": 6, "text": "Douglas called."},
+    ]
+    main.create_app()
+    tools = {tool.name: tool for tool in captured["tools"]}
+    result = json.loads(tools["search_name_mentions"].invoke({"name": "Doug Miers"}))
+    assert [item["match_type"] for item in result["matches"]] == ["exact_name", "first_name_only"]
+    assert result["matches"][1]["text"] == "Doug's cell called."
+    assert "not confirmed" in result["matches"][1]["caveat"]
