@@ -13,6 +13,8 @@ clips reside in S3. Local recordings and transcript files are ignored.
 - Reads call transcripts with timestamps for summaries and excerpt selection.
 - Remembers the selected call through the current browser conversation.
 - Stores clips in S3 and plays them through signed URLs.
+- Provides a responsive chat UI with suggested prompts, loading feedback, and a new-conversation action.
+- Returns clip URLs separately from answer text and provides an audio player plus an "Open audio clip" link.
 - Reports incomplete transcript coverage rather than implying all calls were searched.
 
 ## Setup
@@ -82,6 +84,8 @@ source control; `.env` is ignored by Git.
 Open **http://localhost:8000/** or **http://127.0.0.1:8000/**. The server listens
 on `0.0.0.0`, but that address is not the browser destination. Leave the terminal
 running. To restart, press Ctrl+C and run the command again.
+After UI or backend updates, restart the app and hard-refresh the browser with
+**Ctrl+F5** to load the latest version.
 
 In VS Code, use **Python: Select Interpreter** and select
 `.venv\Scripts\python.exe` so the Run button uses the project environment.
@@ -144,11 +148,18 @@ if any output failed. Restart the app afterward to refresh its index.
 
 ## Chat examples
 
-- ?Which calls are available??
-- ?What was call 20260929_153431_I_3036413833_103.wav about??
-- ?Play an audio clip from call 20260929_153431_I_3036413833_103.wav.?
-- ?Give me clips where Doug Miers is mentioned.?
-- After selecting a call: ?Play the part where they discuss September 29.?
+- "Which calls are available?"
+- "What was call 20260929_153431_I_3036413833_103.wav about?"
+- "Play an audio clip from call 20260929_153431_I_3036413833_103.wav."
+- "Give me clips where Doug Miers is mentioned."
+- After selecting a call: "Play the part where they discuss September 29."
+
+If the app asks for a date after a clip request, a short reply such as
+"September 29" retains the recent clip-request context. Keep the conversation
+open while clarifying; refreshing or selecting **New conversation** clears it.
+
+Use **Enter** to send and **Shift+Enter** for a new line. Suggested prompts help
+list calls, start a name search, or select a call to summarize.
 
 A named playback request without a topic or timestamps defaults to the full call.
 Requested excerpts include 15 seconds of surrounding context by default, controlled
@@ -156,7 +167,7 @@ by `CLIP_CONTEXT_SECONDS` and limited to the recording boundaries. Short recordi
 can therefore produce clips containing the entire call.
 
 Name searches distinguish exact full-name matches from first-name-only candidates.
-For example, ?Doug?s cell? can be offered as a possible match for ?Doug Miers,? but
+For example, "Doug's cell" can be offered as a possible match for "Doug Miers," but
 it does not confirm the surname or identity. The app does not guarantee phonetic
 or alternate-spelling matching. Missing transcripts are excluded from search and
 reported in coverage notices.
@@ -165,6 +176,25 @@ Chat history is kept in the browser page and the most recent 20 messages are sen
 with each request. Refreshing the page clears that history. Generated clips remain
 in S3; the playback endpoint creates a fresh signed URL with a requested one-hour
 lifetime, subject to the signing credentials remaining valid.
+
+## Clip delivery
+
+The chat API returns `response` text and a `clips` list of application playback
+URLs, such as `/api/clips/<hash>.wav`. Successful extraction results populate this
+list independently of the model's HTML. The server also appends audio markup for
+compatibility, while the UI avoids duplicate players for the same URL.
+
+If the agent describes a match but skips extraction, a fallback can create clips
+from exact-name, possible first-name, or literal search matches. For short
+clarification replies it also checks recent clip-request context. A quoted result
+can be recovered only when its filename and text match a loaded transcript;
+arbitrary semantic candidates are not automatically converted to clips. The
+fallback processes up to ten candidates per request.
+
+Each displayed player includes an **Open audio clip** link that opens playback in
+a separate tab. Both the player and link use the app endpoint, which redirects to
+a signed S3 URL. No public bucket access is required. A text statement such as
+"Here is the clip" alone is not proof that audio was created.
 
 ## AWS permissions
 
@@ -189,7 +219,10 @@ under former output prefixes are not migrated automatically.
 | Missing transcripts or incomplete search coverage | Check startup processing errors, credentials, permissions, and OpenAI access; rerun processing and restart. |
 | A name is not found | Inspect coverage and transcript wording; a partial name is not a confirmed full-name match. |
 | Clip generation or playback fails | Check FFmpeg, S3 read/write permissions, and valid AWS signing credentials. |
-| Code changes do not appear | Restart the app and refresh the browser. |
+| Answer says "Here is the clip" but no player appears | Restart the app and press Ctrl+F5. Retry the request; check `/api/chat` in browser developer tools for a nonempty `clips` list. |
+| Player appears but audio does not load | Try **Open audio clip**. Check the playback request and signed S3 response for access or credential errors. |
+| A date-only reply loses context | Keep the same conversation open, or repeat the full request with the name and date after a refresh. |
+| Code changes do not appear | Restart the app and hard-refresh the browser with Ctrl+F5. |
 
 ## Tests
 
@@ -200,5 +233,6 @@ under former output prefixes are not migrated automatically.
 
 The test suite uses mocked external services. It covers missing-output processing,
 S3 paths and error handling, clip generation, transcript coverage, name matching,
-and conversation history. Passing these tests does not verify live AWS or OpenAI
+conversation history, structured clip delivery, omitted-extraction recovery, and
+date clarification follow-ups. Passing these tests does not verify live AWS or OpenAI
 credentials.
