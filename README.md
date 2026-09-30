@@ -64,10 +64,9 @@ side. Clip boundaries are automatically limited to the source audio.
 All data resides in `denverit-demo-bucket`:
 
 - Source audio: `voip-telecom-system/`
-- Transcript JSON: `~./json/`
-- Generated WAV clips: `~./clips/`
+- Transcript JSON: `voip-telecom-system/json/`
+- Generated WAV clips: `voip-telecom-system/clips/`
 
-The `~.` characters are literal S3 key characters, not a home-directory shortcut.
 The app ignores local recordings, local JSON transcripts, and old local indexes.
 It builds its search index in memory and uploads generated clips to S3.
 Playback redirects to a fresh one-hour presigned S3 URL. Clips persist across
@@ -86,14 +85,14 @@ python transcribe_audio.py --limit 1
 python main.py
 ```
 
-Transcription sends S3 audio to OpenAI and writes JSON to `~./json/` in S3. Omit `--limit` to process all recordings. Unchanged objects with
+Transcription sends S3 audio to OpenAI and writes JSON to `voip-telecom-system/json/` in S3. Omit `--limit` to process all recordings. Unchanged objects with
 existing transcripts are skipped; changed objects receive new transcript keys.
 Only transcripts for current S3 recordings are indexed. Restart the app after
 transcription. No existing local files are deleted or uploaded.
 
 AWS permissions: `s3:ListBucket` on the bucket, `s3:GetObject` for the configured
-audio prefix and both output prefixes, and `s3:PutObject` on `~./json/*` and
-`~./clips/*`. Existing objects under the former `_transcripts/` prefix are not
+audio prefix and both output prefixes, and `s3:PutObject` on `voip-telecom-system/json/*` and
+`voip-telecom-system/clips/*`. Existing objects under the former `_transcripts/` prefix are not
 moved automatically; new transcription runs use the configured JSON prefix.
 Customer-managed KMS encryption may also require key permissions.
 

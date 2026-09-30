@@ -16,15 +16,15 @@ class S3AudioTests(unittest.TestCase):
         store.save_transcript(item, {"text": "hello"})
         args = client.put_object.call_args.kwargs
         self.assertEqual(args["Bucket"], "bucket")
-        self.assertTrue(args["Key"].startswith("~./json/"))
+        self.assertTrue(args["Key"].startswith("voip-telecom-system/json/"))
         self.assertEqual(json.loads(args["Body"]), {"text": "hello"})
         name = "a" * 64 + ".wav"
         store.save_clip(name, b"RIFF")
-        client.put_object.assert_called_with(Bucket="bucket", Key="~./clips/" + name,
+        client.put_object.assert_called_with(Bucket="bucket", Key="voip-telecom-system/clips/" + name,
                                              Body=b"RIFF", ContentType="audio/wav")
         store.clip_url(name)
         client.generate_presigned_url.assert_called_with(
-            "get_object", Params={"Bucket": "bucket", "Key": "~./clips/" + name}, ExpiresIn=3600)
+            "get_object", Params={"Bucket": "bucket", "Key": "voip-telecom-system/clips/" + name}, ExpiresIn=3600)
         with self.assertRaises(ValueError):
             store.clip_url("../secret.wav")
 

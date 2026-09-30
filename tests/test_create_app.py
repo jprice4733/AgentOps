@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 from io import BytesIO
 
 from fastapi.testclient import TestClient
@@ -10,6 +10,7 @@ def configure(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(main, "ROOT", tmp_path)
     store = Mock()
+    store.bucket = "bucket"
     store.audio_objects.return_value = [{"Key": "calls/a.wav"}]
     store.transcript.return_value = {
         "file_path": "s3://bucket/calls/a.wav",
@@ -59,3 +60,54 @@ def test_s3_failure_has_no_local_fallback(monkeypatch, tmp_path):
     embeddings.embed_documents.assert_not_called()
     response = TestClient(app).post("/api/chat", json={"message": "search"})
     assert "No AWS credentials" in response.json()["response"]
+
+
+def test_missing_transcripts_returns_actionable_message(monkeypatch, tmp_path):
+    store, embeddings, captured = configure(monkeypatch, tmp_path)
+    store.transcript.return_value = None
+    main.create_app()
+    tools = {tool.name: tool for tool in captured["tools"]}
+    assert "no current transcript" in tools["read_call_transcript"].invoke({"file_path": "a.wav"})
+    embeddings.embed_documents.assert_not_called()
+
+
+def test_subject_tools_expose_only_selected_call(monkeypatch, tmp_path):
+    store, _, captured = configure(monkeypatch, tmp_path)
+    main.create_app()
+    tools = {tool.name: tool for tool in captured["tools"]}
+    assert "s3://bucket/calls/a.wav" in tools["list_calls"].invoke({})
+    result = tools["read_call_transcript"].invoke({"file_path": "s3://bucket/calls/a.wav"})
+    assert "hello" in result
+    assert "Call not found" in tools["read_call_transcript"].invoke({"file_path": "other"})
+
+
+def test_whole_call_clip_accepts_filename_without_timestamps(monkeypatch, tmp_path):
+    store, _, captured = configure(monkeypatch, tmp_path)
+    main.create_app()
+    wav = BytesIO()
+    AudioSegment.silent(duration=2000).export(wav, format="wav")
+    store.audio_stream.return_value = BytesIO(wav.getvalue())
+    tools = {tool.name: tool for tool in captured["tools"]}
+    url = tools["extract_audio_clip"].invoke({"file_path": "a.wav"})
+    assert url.startswith("/api/clips/")
+    store.audio_stream.assert_called_once_with("s3://bucket/calls/a.wav")
+    saved = store.save_clip.call_args.args[1]
+    assert len(AudioSegment.from_file(BytesIO(saved), format="wav")) == 2000
+    import json
+    payload = json.loads(tools["read_call_transcript"].invoke({"file_path": "a.wav"}))
+    assert payload["segments"][0]["end"] == 1
+
+
+def test_followup_passes_history_without_sharing_between_requests(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path)
+    agent = Mock()
+    agent.ainvoke = AsyncMock(return_value={"messages": [Mock(content="Done")]})
+    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: agent)
+    client = TestClient(main.create_app())
+    history = [{"role": "user", "content": "Play a.wav"},
+               {"role": "assistant", "content": "Playing a.wav"}]
+    client.post("/api/chat", json={"message": "where discuss september 29", "history": history})
+    assert agent.ainvoke.call_args.args[0]["messages"] == history + [
+        {"role": "user", "content": "where discuss september 29"}]
+    client.post("/api/chat", json={"message": "hello"})
+    assert len(agent.ainvoke.call_args.args[0]["messages"]) == 1

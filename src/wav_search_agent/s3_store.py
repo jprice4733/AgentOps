@@ -33,8 +33,8 @@ def list_audio(client, bucket, prefix):
 class S3Store:
     def __init__(self, uri=None, profile=None, client=None):
         self.bucket, self.prefix = parse_location(uri or os.getenv("S3_AUDIO_URI", DEFAULT_URI))
-        self.json_prefix = os.getenv("S3_JSON_PREFIX", "~./json/").strip("/") + "/"
-        self.clips_prefix = os.getenv("S3_CLIPS_PREFIX", "~./clips/").strip("/") + "/"
+        self.json_prefix = os.getenv("S3_JSON_PREFIX", "voip-telecom-system/json/").strip("/") + "/"
+        self.clips_prefix = os.getenv("S3_CLIPS_PREFIX", "voip-telecom-system/clips/").strip("/") + "/"
         self.client = client or boto3.Session(profile_name=profile).client(
             "s3", config=Config(signature_version="s3v4"))
 
