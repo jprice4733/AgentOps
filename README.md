@@ -155,8 +155,8 @@ if any output failed. Restart the app afterward to refresh its index.
 - After selecting a call: "Play the part where they discuss September 29."
 
 If the app asks for a date after a clip request, a short reply such as
-"September 29" retains the recent clip-request context. Keep the conversation
-open while clarifying; refreshing or selecting **New conversation** clears it.
+"September 29" retains the recent clip-request context. Continue in the same conversation while clarifying. Select it from **Past chats**
+to resume later; **New conversation** starts a separate chat.
 
 Use **Enter** to send and **Shift+Enter** for a new line. Suggested prompts help
 list calls, start a name search, or select a call to summarize.
@@ -172,8 +172,15 @@ it does not confirm the surname or identity. The app does not guarantee phonetic
 or alternate-spelling matching. Missing transcripts are excluded from search and
 reported in coverage notices.
 
-Chat history is kept in the browser page and the most recent 20 messages are sent
-with each request. Refreshing the page clears that history. Generated clips remain
+Completed conversations are saved in browser local storage and listed in the
+**Past chats** sidebar, newest first. Select a chat to reopen its messages and audio
+players, or use its delete button to remove the saved conversation. The active chat
+is restored after a refresh. Only the most recent 20 messages from the selected
+chat are sent with each request. Chats are specific to this browser and site address
+(`localhost` and `127.0.0.1` have separate storage); they are not synchronized to S3
+or other devices. Clearing browser storage removes saved chats. If browser storage
+is unavailable or full, a notice appears and changes remain only in memory. Deleting
+a chat does not delete its audio files from S3. Generated clips remain
 in S3; the playback endpoint creates a fresh signed URL with a requested one-hour
 lifetime, subject to the signing credentials remaining valid.
 
@@ -221,7 +228,7 @@ under former output prefixes are not migrated automatically.
 | Clip generation or playback fails | Check FFmpeg, S3 read/write permissions, and valid AWS signing credentials. |
 | Answer says "Here is the clip" but no player appears | Restart the app and press Ctrl+F5. Retry the request; check `/api/chat` in browser developer tools for a nonempty `clips` list. |
 | Player appears but audio does not load | Try **Open audio clip**. Check the playback request and signed S3 response for access or credential errors. |
-| A date-only reply loses context | Keep the same conversation open, or repeat the full request with the name and date after a refresh. |
+| A date-only reply loses context | Reopen the appropriate conversation from Past chats, or repeat the full request with the name and date. |
 | Code changes do not appear | Restart the app and hard-refresh the browser with Ctrl+F5. |
 
 ## Tests
