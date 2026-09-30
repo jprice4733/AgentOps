@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAV · Call intelligence</title>
+  <style>
+    :root { color-scheme: light; --ink:#242824; --muted:#70766d; --line:#e3e5dd; --paper:#fafbf7; --accent:#c3532c; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }
+    button,textarea { font:inherit; }
+    button { cursor:pointer; }
+    button:disabled { cursor:wait; opacity:.5; }
+    button:focus-visible,textarea:focus-visible { outline:3px solid #d99477; outline-offset:4px; }
+    .shell { display:grid; grid-template-columns:238px 1fr; height:100dvh; }
+    aside { background:#eef0e8; border-right:1px solid var(--line); padding:30px 22px; display:flex; flex-direction:column; }
+    .brand { display:flex; align-items:center; gap:11px; font-weight:800; font-size:23px; letter-spacing:-1px; }
+    .mark { width:36px; height:36px; background:var(--ink); color:white; border-radius:11px; display:flex; justify-content:center; align-items:center; gap:3px; }
+    .mark i { display:block; background:currentColor; width:3px; border-radius:2px; height:12px; }
+    .mark i:nth-child(2),.mark i:nth-child(4) { height:20px; }
+    .mark i:nth-child(3) { height:26px; }
+    .brand-sub { margin:10px 0 35px; color:var(--muted); font-size:12px; }
+    .new { background:white; border:1px solid #d6d9ce; border-radius:10px; text-align:left; padding:13px 15px; font-size:13px; font-weight:600; }
+    .new span { margin-right:9px; font-size:19px; font-weight:400; }
+    .section-label { font-size:10px; letter-spacing:1.8px; color:var(--muted); font-weight:700; margin:34px 12px 13px; }
+    .nav-active { font-size:13px; padding:13px; background:#e1e5d8; border-radius:9px; font-weight:600; }
+    .nav-active span { color:var(--accent); margin-right:10px; }
+    .source { margin-top:auto; padding:16px 12px 0; border-top:1px solid #d8dccf; font-size:12px; line-height:1.7; color:var(--muted); }
+    .source strong { display:block; color:var(--ink); font-weight:600; }
+    main { min-width:0; display:flex; flex-direction:column; height:100dvh; }
+    header { padding:22px 36px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); gap:12px; }
+    .breadcrumb { font-size:13px; color:var(--muted); }
+    .breadcrumb b { font-weight:500; color:var(--ink); }
+    .badge { font-size:11px; padding:6px 10px; border:1px solid var(--line); border-radius:20px; white-space:nowrap; color:var(--muted); }
+    #chatBox { flex:1; overflow-y:auto; padding:30px max(28px,calc((100% - 820px)/2)); }
+    .welcome { max-width:740px; margin:clamp(20px,6vh,80px) auto 28px; }
+    .eyebrow { color:var(--accent); font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:20px; }
+    h1 { font-size:clamp(32px,4vw,49px); line-height:1.12; letter-spacing:-2px; font-weight:550; margin:0 0 20px; }
+    h1 span { color:#87917a; }
+    .intro { color:var(--muted); font-size:15px; line-height:1.7; max-width:480px; }
+    .suggestions { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:35px; }
+    .suggestion { background:white; border:1px solid var(--line); border-radius:13px; padding:20px 17px; text-align:left; transition:transform .15s,border-color .15s; }
+    .suggestion:hover { transform:translateY(-3px); border-color:#abb59e; }
+    .suggestion .icon { color:var(--accent); font-size:23px; display:block; margin-bottom:23px; }
+    .suggestion strong { font-size:13px; font-weight:600; display:block; margin-bottom:7px; }
+    .suggestion small { color:var(--muted); font-size:12px; line-height:1.5; display:block; }
+    .message { margin:22px 0; display:flex; flex-direction:column; align-items:flex-start; animation:appear .2s ease; }
+    .message.user { align-items:flex-end; }
+    .author { font-size:10px; font-weight:700; letter-spacing:1.3px; color:var(--muted); margin:0 4px 9px; }
+    .bubble { font-size:14px; line-height:1.8; overflow-wrap:anywhere; max-width:100%; white-space:pre-wrap; }
+    .user .bubble { background:#e9eddf; border:1px solid #dce2ce; padding:12px 18px; border-radius:16px 16px 3px 16px; max-width:85%; }
+    .agent .bubble { padding:4px; width:100%; }
+    .bubble p { margin:8px 0; }
+    .bubble audio { display:block; width:100%; max-width:540px; margin:16px 0; border-radius:28px; }
+    .bubble code { background:#edf0e7; padding:2px 5px; border-radius:4px; font-size:12px; }
+    .waiting { color:var(--muted); font-size:13px; }
+    .waiting::after { content:' · · ·'; color:var(--accent); }
+    .composer-area { padding:15px max(28px,calc((100% - 820px)/2)) 18px; }
+    .composer { background:white; border:1px solid #d9ded0; border-radius:17px; padding:15px; box-shadow:0 5px 22px #2d392408; }
+    .composer:focus-within { border-color:#9cae87; box-shadow:0 0 0 3px #e9eddf; }
+    textarea { resize:none; width:100%; background:transparent; border:0; outline:none; padding:2px 3px; min-height:48px; max-height:160px; color:var(--ink); font-size:14px; line-height:1.5; }
+    textarea::placeholder { color:#8c9285; }
+    .composer-bottom { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .hint { font-size:11px; color:var(--muted); }
+    .send { border:0; background:var(--ink); color:white; border-radius:9px; padding:9px 15px; font-size:12px; font-weight:600; }
+    .send:hover { background:#45513b; }
+    .footer { text-align:center; font-size:10px; color:#858b7e; margin:12px 0 0; }
+    @keyframes appear { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+    @media(max-width:850px) { .shell { grid-template-columns:180px 1fr; } aside { padding:24px 15px; } .suggestions { grid-template-columns:1fr; gap:8px; } .suggestion { padding:14px; } .suggestion .icon { float:left; margin:0 15px 0 0; } .welcome { margin-top:20px; } }
+    @media(max-width:600px) { .shell { grid-template-columns:1fr; } aside { display:none; } header { padding:16px 20px; } #chatBox { padding:24px 20px; } .composer-area { padding:12px 16px; } h1 { letter-spacing:-1px; } .mobile-new { display:block!important; border:0; background:transparent; color:var(--accent); font-size:12px; } .badge { display:none; } }
+    @media(prefers-reduced-motion:reduce) { * { animation:none!important; transition:none!important; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside aria-label="Workspace">
+      <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>WAV<span style="color:var(--accent)">.</span></div>
+      <p class="brand-sub">Your conversations, made searchable.</p>
+      <button class="new" data-reset><span aria-hidden="true">+</span>New conversation</button>
+      <div class="section-label">WORKSPACE</div>
+      <div class="nav-active"><span aria-hidden="true">◉</span>Call intelligence</div>
+      <div class="source">BUILT AROUND YOUR CALLS<strong>Search. Listen. Understand.</strong>Audio &amp; transcripts stored in S3</div>
+    </aside>
+    <main>
+      <header><div class="breadcrumb">Workspace <span style="margin:0 10px;color:#b4baac">/</span> <b>Call intelligence</b></div><span class="badge">Audio workspace</span><button class="mobile-new" style="display:none" data-reset>New chat</button></header>
+      <div id="chatBox" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions">
+        <section class="welcome" id="welcome">
+          <div class="eyebrow">LESS SEARCHING. MORE UNDERSTANDING.</div>
+          <h1>Every call has a story.<br><span>Find the part that matters.</span></h1>
+          <p class="intro">Ask a question, find a name, or jump straight to the audio. Make sense of your calls in one conversation.</p>
+          <div class="suggestions">
+            <button class="suggestion" data-prompt="Which calls are available?"><span class="icon" aria-hidden="true">≡</span><strong>Explore your calls ↗</strong><small>See what's available to search.</small></button>
+            <button class="suggestion" data-prompt="Give me clips where " data-draft><span class="icon" aria-hidden="true">⌕</span><strong>Find a mention ↗</strong><small>Listen to moments about a person.</small></button>
+            <button class="suggestion" data-prompt="Help me select a call to summarize."><span class="icon" aria-hidden="true">↗</span><strong>Get the main idea ↗</strong><small>Understand what a call was about.</small></button>
+          </div>
+        </section>
+      </div>
+      <div class="composer-area">
+        <form class="composer" id="chatForm">
+          <textarea id="userInput" rows="2" aria-label="Message" placeholder="Ask about your calls…"></textarea>
+          <div class="composer-bottom"><span class="hint">Enter to send · Shift + Enter for a new line</span><button class="send" id="sendButton" type="submit">Send <span aria-hidden="true">↑</span></button></div>
+        </form>
+        <p class="footer">Check important details against the recording. Name matches may be approximate.</p>
+      </div>
+    </main>
+  </div>
+  <script>
+    const history = [];
+    let sending = false;
+    const input = document.getElementById('userInput');
+    const chatBox = document.getElementById('chatBox');
+    const welcome = document.getElementById('welcome');
+    const sendButton = document.getElementById('sendButton');
+    // Preserve formatting and audio without executing model-supplied HTML.
+    function renderAnswer(text) {
+      const parsed = new DOMParser().parseFromString(text, 'text/html');
+      const fragment = document.createDocumentFragment();
+      function copy(node, target) {
+        if (node.nodeType === Node.TEXT_NODE) { target.append(document.createTextNode(node.textContent)); return; }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const tag = node.tagName.toLowerCase();
+        if (['script','style','iframe','object'].includes(tag)) return;
+        if (tag === 'audio') {
+          const src = node.getAttribute('src') || node.querySelector('source')?.getAttribute('src') || '';
+          if (/^\/api\/clips\/[a-f0-9]{64}\.wav$/.test(src)) {
+            const audio = document.createElement('audio');
+            audio.controls = true; audio.preload = 'none'; audio.src = src;
+            audio.setAttribute('aria-label', 'Call recording clip'); target.append(audio);
+          }
+          return;
+        }
+        const safe = ['p','br','strong','em','b','i','ul','ol','li','code','pre'].includes(tag);
+        const destination = safe ? document.createElement(tag) : target;
+        for (const child of node.childNodes) copy(child, destination);
+        if (safe) target.append(destination);
+      }
+      for (const node of parsed.body.childNodes) copy(node, fragment);
+      return fragment;
+    }
+    function appendMessage(role, text, pending = false) {
+      const message = document.createElement('div'); message.className = 'message ' + role;
+      const label = document.createElement('div'); label.className = 'author'; label.textContent = role === 'user' ? 'YOU' : 'WAV';
+      const bubble = document.createElement('div'); bubble.className = 'bubble' + (pending ? ' waiting' : '');
+      if (role === 'agent' && !pending) bubble.append(renderAnswer(text)); else bubble.textContent = text;
+      message.append(label, bubble); chatBox.append(message); chatBox.scrollTop = chatBox.scrollHeight;
+      return message;
+    }
+    function setBusy(value) {
+      sending = value; sendButton.disabled = value; sendButton.textContent = value ? 'Working…' : 'Send ↑';
+      document.querySelectorAll('[data-reset]').forEach(button => button.disabled = value);
+    }
+    async function sendMessage() {
+      const text = input.value.trim();
+      if (!text || sending) return;
+      setBusy(true); welcome.hidden = true; appendMessage('user', text); input.value = '';
+      const pending = appendMessage('agent', 'Looking through your calls', true);
+      try {
+        const response = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:text, history:history.slice(-20)})});
+        if (!response.ok) throw new Error('Could not send your message. Please try again.');
+        const data = await response.json();
+        history.push({role:'user',content:text},{role:'assistant',content:data.response});
+        pending.remove();
+        const message = appendMessage('agent', data.response);
+        const bubble = message.querySelector('.bubble');
+        for (const url of data.clips || []) {
+          if (!/^\/api\/clips\/[a-f0-9]{64}\.wav$/.test(url)) continue;
+          if ([...bubble.querySelectorAll('audio')].some(audio => audio.getAttribute('src') === url)) continue;
+          const audio = document.createElement('audio');
+          audio.controls = true; audio.preload = 'none'; audio.src = url;
+          audio.setAttribute('aria-label', 'Call recording clip');
+          bubble.append(audio);
+        }
+        for (const audio of bubble.querySelectorAll('audio')) {
+          const link = document.createElement('a');
+          link.href = audio.getAttribute('src');
+          link.target = '_blank'; link.rel = 'noopener';
+          link.textContent = 'Open audio clip ↗';
+          link.style.cssText = 'display:block;color:var(--accent);font-size:13px;margin:8px 0 18px';
+          audio.after(link);
+        }
+        chatBox.scrollTop = chatBox.scrollHeight;
+      } catch (error) {
+        pending.remove(); appendMessage('agent', 'Could not complete the request. Check your connection and try again.');
+        if (!input.value) input.value = text;
+      } finally { setBusy(false); input.focus(); }
+    }
+    document.getElementById('chatForm').addEventListener('submit', event => { event.preventDefault(); sendMessage(); });
+    input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); } });
+    document.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => {
+      if (sending) return; input.value = button.dataset.prompt; input.focus(); if (!button.hasAttribute('data-draft')) sendMessage();
+    }));
+    document.querySelectorAll('[data-reset]').forEach(button => button.addEventListener('click', () => {
+      if (sending) return; history.length = 0; chatBox.querySelectorAll('.message').forEach(message => message.remove());
+      welcome.hidden = false; input.value = ''; input.focus();
+    }));
+  </script>
+</body>
+</html>

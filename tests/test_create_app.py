@@ -41,6 +41,7 @@ def test_s3_index_and_persisted_clip(monkeypatch, tmp_path):
     store.audio_stream.return_value = BytesIO(wav.getvalue())
     url = captured["tools"][1].invoke({"file_path": "s3://bucket/calls/a.wav", "start_time": 0, "end_time": 1})
     store.save_clip.assert_called_once()
+
     assert store.save_clip.call_args.args[1].startswith(b"RIFF")
     store.clip_url.return_value = "https://bucket.s3.amazonaws.com/clip?signature=test"
     response = client.get(url, follow_redirects=False)
@@ -49,6 +50,27 @@ def test_s3_index_and_persisted_clip(monkeypatch, tmp_path):
     store.clip_url.side_effect = ValueError("Invalid clip name")
     assert client.get("/api/clips/unknown.wav").status_code == 404
     assert not list(tmp_path.iterdir())
+
+
+def test_date_clarification_creates_clip_from_verified_quote(monkeypatch, tmp_path):
+    from langchain_core.messages import AIMessage
+    store, _, _ = configure(monkeypatch, tmp_path)
+    store.transcript.return_value["segments"] = [{"start": 0, "end": 1,
+        "text": "This call is coming from Doug's cell."}]
+    wav = BytesIO()
+    AudioSegment.silent(duration=2000).export(wav, format="wav")
+    store.audio_stream.return_value = BytesIO(wav.getvalue())
+    agent = Mock()
+    agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(
+        content="Call: s3://bucket/calls/a.wav. This call is coming from Doug's cell. Here is the clip:")]})
+    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: agent)
+    client = TestClient(main.create_app())
+    result = client.post("/api/chat", json={"message": "September 29", "history": [
+        {"role": "user", "content": "Give me clips where Doug"},
+        {"role": "assistant", "content": "Which date?"}]}).json()
+    assert len(result["clips"]) == 1
+    assert '<audio controls' in result["response"]
+    store.save_clip.assert_called_once()
 
 
 def test_s3_failure_has_no_local_fallback(monkeypatch, tmp_path):
@@ -155,3 +177,44 @@ def test_name_search_labels_partial_mentions_without_claiming_identity(monkeypat
     assert [item["match_type"] for item in result["matches"]] == ["exact_name", "first_name_only"]
     assert result["matches"][1]["text"] == "Doug's cell called."
     assert "not confirmed" in result["matches"][1]["caveat"]
+
+
+def test_clip_result_survives_missing_model_audio_markup(monkeypatch, tmp_path):
+    from langchain_core.messages import AIMessage, ToolMessage
+    configure(monkeypatch, tmp_path)
+    url = "/api/clips/" + "a" * 64 + ".wav"
+    agent = Mock()
+    agent.ainvoke = AsyncMock(return_value={"messages": [
+        ToolMessage(content=url, name="extract_audio_clip", tool_call_id="1"),
+        ToolMessage(content=url, name="extract_audio_clip", tool_call_id="2"),
+        ToolMessage(content="/api/clips/" + "b" * 64 + ".wav",
+                    name="extract_audio_clip", tool_call_id="3", status="error"),
+        AIMessage(content="Here is the audio clip:"),
+    ]})
+    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: agent)
+    result = TestClient(main.create_app()).post("/api/chat", json={"message": "Give me clips"}).json()
+    assert result["clips"] == [url]
+    assert result["response"].startswith("Here is the audio clip:")
+    assert '<audio controls' in result["response"]
+
+
+def test_clip_request_extracts_name_match_when_agent_only_describes_it(monkeypatch, tmp_path):
+    import json
+    from langchain_core.messages import AIMessage, ToolMessage
+    store, _, _ = configure(monkeypatch, tmp_path)
+    wav = BytesIO()
+    AudioSegment.silent(duration=2000).export(wav, format="wav")
+    store.audio_stream.return_value = BytesIO(wav.getvalue())
+    agent = Mock()
+    agent.ainvoke = AsyncMock(return_value={"messages": [
+        ToolMessage(content=json.dumps({"matches": [{
+            "file_path": "s3://bucket/calls/a.wav", "start_time": 0, "end_time": 1,
+            "text": "Doug's cell", "match_type": "exact_name"}]}),
+            name="search_name_mentions", tool_call_id="1"),
+        AIMessage(content="Here is the audio clip:"),
+    ]})
+    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: agent)
+    result = TestClient(main.create_app()).post("/api/chat", json={"message": "Give me clips where doug"}).json()
+    assert len(result["clips"]) == 1
+    assert '<audio controls' in result["response"]
+    store.save_clip.assert_called_once()

@@ -267,6 +267,7 @@ def create_app():
 
     class ChatResponse(BaseModel):
         response: str
+        clips: list[str] = Field(default_factory=list)
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat_endpoint(request: ChatRequest):
@@ -289,6 +290,68 @@ def create_app():
             response_text = final_message.content
             if not isinstance(response_text, str):
                 response_text = str(response_text)
+            # Use successful tool results rather than relying on model-authored HTML.
+            clips = []
+            for message in result["messages"]:
+                if (getattr(message, "type", None) == "tool"
+                        and getattr(message, "name", None) == "extract_audio_clip"
+                        and getattr(message, "status", "success") != "error"):
+                    url = getattr(message, "content", None)
+                    if isinstance(url, str) and re.fullmatch(r"/api/clips/[0-9a-f]{64}\.wav", url):
+                        if url not in clips:
+                            clips.append(url)
+            # Some agent responses describe a match but omit the extraction call.
+            # Only use grounded name/literal results, never arbitrary semantic candidates.
+            clip_pattern = r"\b(clips?|play|listen|audio)\b"
+            wants_clip = bool(re.search(clip_pattern, request.message, re.I))
+            if not wants_clip and len(request.message.split()) <= 8:
+                previous_users = [turn.content for turn in request.history if turn.role == "user"]
+                wants_clip = any(re.search(clip_pattern, text, re.I) for text in previous_users[-3:])
+            if re.search(r"\b(no|don't|do not)\s+(audio|clips?|play)\b", request.message, re.I):
+                wants_clip = False
+            if not clips and wants_clip:
+                candidates = []
+                for message in result["messages"]:
+                    if (getattr(message, "type", None) != "tool"
+                            or getattr(message, "name", None) not in (
+                                "search_name_mentions", "search_transcript_segments")):
+                        continue
+                    try:
+                        payload = json.loads(message.content)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    for match in payload.get("matches", []):
+                        if (isinstance(match, dict) and
+                                (payload.get("match_type") == "literal" or
+                                 match.get("match_type") in ("exact_name", "first_name_only"))):
+                            candidates.append(match)
+                if not candidates:
+                    # A follow-up may quote a previously selected result without rerunning
+                    # tools. Recover only text verified against the loaded transcripts.
+                    normalize = lambda text: " ".join(re.findall(r"\w+", text.casefold()))
+                    answer = normalize(response_text)
+                    for segment in segment_records:
+                        filename = segment["file_path"].rsplit("/", 1)[-1]
+                        quoted = normalize(segment["text"])
+                        if (len(quoted) >= 12 and quoted in answer
+                                and normalize(filename) in answer):
+                            candidates.append(segment)
+                seen = set()
+                for match in candidates[:10]:
+                    args = {key: match[key] for key in ("file_path", "start_time", "end_time")}
+                    identity = tuple(args.values())
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    try:
+                        clips.append(await extract_audio_clip.ainvoke(args))
+                    except Exception:
+                        response_text += "<p>A matching clip could not be created. Please retry.</p>"
+            # Include a server-built player as well as structured data for older UI tabs.
+            for url in clips:
+                response_text += f'<audio controls preload="none" src="{url}"></audio>'
             missing = search_coverage()["missing_transcripts"]
             if missing:
                 response_text += (
@@ -296,77 +359,13 @@ def create_app():
                     "have current transcripts. Untranscribed recordings were not searched. "
                     "Transcribe missing recordings and restart the app to include them.</p>"
                 )
-            return ChatResponse(response=response_text)
+            return ChatResponse(response=response_text, clips=clips)
         except Exception as error:
             return ChatResponse(response=f"Chat request failed: {error}")
 
     @app.get("/", response_class=HTMLResponse)
     async def get_chat_ui():
-        return """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <title>Audio File Search Agent</title>
-            <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; background: #f7f9fc; }
-                .chat-box { background: white; border: 1px solid #dfe3ea; border-radius: 10px; padding: 20px; min-height: 420px; max-height: 520px; overflow-y: auto; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
-                .msg { margin-bottom: 14px; padding: 12px 14px; border-radius: 8px; line-height: 1.5; }
-                .user { background: #e8f1ff; color: #123; margin-left: 20%; }
-                .agent { background: #f3f4f6; color: #1b1f23; margin-right: 20%; }
-                input { width: calc(100% - 90px); padding: 12px; border: 1px solid #cfd7df; border-radius: 8px; }
-                button { padding: 12px 18px; border: none; border-radius: 8px; background: #0b57d0; color: white; cursor: pointer; }
-                audio { display: block; width: 100%; max-width: 420px; margin-top: 8px; }
-            </style>
-        </head>
-        <body>
-            <h2>WAV Search Agent</h2>
-            <div class="chat-box" id="chatBox">
-                <div class="msg agent">Hello! Ask me to search the transcripts from your audio files.</div>
-            </div>
-            <div style="margin-top: 16px; display: flex; gap: 10px;">
-                <input id="userInput" placeholder="Ask about the audio transcripts" onkeydown="if(event.key === 'Enter') sendMessage()">
-                <button onclick="sendMessage()">Send</button>
-            </div>
-            <script>
-                const history = [];
-                let sending = false;
-                async function sendMessage() {
-                    const input = document.getElementById('userInput');
-                    const chatBox = document.getElementById('chatBox');
-                    const text = input.value.trim();
-                    if (!text || sending) return;
-                    sending = true;
-
-                    chatBox.innerHTML += `<div class="msg user">${escapeHtml(text)}</div>`;
-                    input.value = '';
-                    chatBox.scrollTop = chatBox.scrollHeight;
-
-                    try {
-                    const response = await fetch('/api/chat', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: text, history: history.slice(-20) })
-                    });
-                    if (!response.ok) throw new Error('Chat request failed. Please retry.');
-                    const data = await response.json();
-                    history.push({role: 'user', content: text}, {role: 'assistant', content: data.response});
-                    chatBox.innerHTML += `<div class="msg agent">${data.response}</div>`;
-                    } catch (error) {
-                        chatBox.innerHTML += `<div class="msg agent">${escapeHtml(error.message)}</div>`;
-                    } finally {
-                        sending = false;
-                    }
-                    chatBox.scrollTop = chatBox.scrollHeight;
-                }
-
-                function escapeHtml(str) {
-                    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                }
-            </script>
-        </body>
-        </html>
-        """
+        return (Path(__file__).resolve().parent / "static" / "chat.html").read_text(encoding="utf-8")
 
     return app
 
