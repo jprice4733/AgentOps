@@ -151,7 +151,7 @@ if any output failed. Restart the app afterward to refresh its index.
 - "Which calls are available?"
 - "What was call 20260929_153431_I_3036413833_103.wav about?"
 - "Play an audio clip from call 20260929_153431_I_3036413833_103.wav."
-- "Give me clips where Doug Miers is mentioned."
+- "Give me clips where Joe Smith is mentioned."
 - After selecting a call: "Play the part where they discuss September 29."
 
 If the app asks for a date after a clip request, a short reply such as
