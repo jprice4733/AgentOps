@@ -174,3 +174,16 @@ def test_empty_transcript_completes_without_vectors(env):
     client.audio.transcriptions.create.return_value = Mock(text="", segments=[])
     assert make(client).run_once()["done"] == 1
     assert vectors.count() == 0 and catalog.stats()["segments"] == 0
+
+
+def test_local_vector_store_is_safe_under_concurrent_workers(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    vectors = VectorStore(QdrantClient(path=str(tmp_path / "vectors")), vector_size=4)
+    segments = [{"idx": i, "start_time": 0.0, "end_time": 1.0, "text": "t"} for i in range(20)]
+
+    def work(n):
+        vectors.replace_call(f"s3://b/{n}.wav", "f", segments, [[1.0, 0.0, 0.0, 0.0]] * 20)
+        vectors.search([1.0, 0.0, 0.0, 0.0], 3)
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(work, range(40)))
+    assert vectors.count() == 40 * 20

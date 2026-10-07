@@ -1,5 +1,6 @@
 """Persistent Qdrant vector store with idempotent, per-call replacement."""
 import os
+import threading
 import uuid
 
 from qdrant_client import QdrantClient
@@ -20,10 +21,12 @@ def point_id(uri, fingerprint, idx):
 
 
 class VectorStore:
-    def __init__(self, client, collection=COLLECTION, vector_size=VECTOR_SIZE):
+    def __init__(self, client, collection=COLLECTION, vector_size=VECTOR_SIZE, thread_safe=False):
+        """`thread_safe` is True only for a Qdrant server; local mode is not safe across threads."""
         self.client = client
         self.collection = collection
         self.vector_size = vector_size
+        self._lock = _NullLock() if thread_safe else threading.RLock()
         self._ensure_collection()
 
     @classmethod
@@ -34,10 +37,9 @@ class VectorStore:
         """
         url = os.getenv("QDRANT_URL")
         if url:
-            client = QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY") or None)
-        else:
-            client = QdrantClient(path=os.getenv("QDRANT_PATH", str(VECTOR_DIR)))
-        return cls(client)
+            return cls(QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY") or None),
+                       thread_safe=True)
+        return cls(QdrantClient(path=os.getenv("QDRANT_PATH", str(VECTOR_DIR))))
 
     def _ensure_collection(self):
         if not self.client.collection_exists(self.collection):
@@ -50,29 +52,41 @@ class VectorStore:
             pass
 
     def delete_call(self, uri):
-        self.client.delete(
-            collection_name=self.collection,
-            points_selector=FilterSelector(filter=Filter(must=[
-                FieldCondition(key="file_path", match=MatchValue(value=uri))])))
+        with self._lock:
+            self.client.delete(
+                collection_name=self.collection,
+                points_selector=FilterSelector(filter=Filter(must=[
+                    FieldCondition(key="file_path", match=MatchValue(value=uri))])))
 
     def replace_call(self, uri, fingerprint, segments, vectors):
         """Replace every vector for a call. `segments` carry idx, start_time, end_time, text."""
         if len(segments) != len(vectors):
             raise ValueError("Each segment needs exactly one vector.")
-        self.delete_call(uri)
         points = [PointStruct(
             id=point_id(uri, fingerprint, segment["idx"]), vector=vector,
             payload={"file_path": uri, "fingerprint": fingerprint,
                      "start_time": segment["start_time"], "end_time": segment["end_time"],
                      "text": segment["text"]})
             for segment, vector in zip(segments, vectors)]
-        for offset in range(0, len(points), UPSERT_BATCH):
-            self.client.upsert(collection_name=self.collection,
-                               points=points[offset:offset + UPSERT_BATCH])
+        with self._lock:
+            self.delete_call(uri)
+            for offset in range(0, len(points), UPSERT_BATCH):
+                self.client.upsert(collection_name=self.collection,
+                                   points=points[offset:offset + UPSERT_BATCH])
 
     def search(self, vector, limit=5):
-        return self.client.query_points(
-            collection_name=self.collection, query=vector, limit=limit).points
+        with self._lock:
+            return self.client.query_points(
+                collection_name=self.collection, query=vector, limit=limit).points
 
     def count(self):
-        return self.client.count(collection_name=self.collection, exact=True).count
+        with self._lock:
+            return self.client.count(collection_name=self.collection, exact=True).count
+
+
+class _NullLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
