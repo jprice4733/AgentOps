@@ -51,7 +51,6 @@ OPENAI_API_KEY=your_openai_api_key
 S3_AUDIO_URI=s3://denverit-demo-bucket/voip-telecom-system/
 S3_JSON_PREFIX=voip-telecom-system/json/
 S3_CLIPS_PREFIX=voip-telecom-system/clips/
-S3_AUTO_PROCESS=true
 CLIP_CONTEXT_SECONDS=15
 AWS_DEFAULT_REGION=your_bucket_region
 ```
@@ -102,27 +101,15 @@ Output prefixes are relative to the bucket, not to the source audio folder.
 The scanner excludes both output folders from source recordings. Supported source
 extensions are `.wav`, `.mp3`, `.m4a`, `.mp4`, `.mpeg`, `.mpga`, and `.webm`.
 
-With `S3_AUTO_PROCESS=true` (the default), startup:
+Recordings are ingested by the separate worker (see "Ingestion worker" below), not at
+web app startup. The worker lists source recordings, transcribes any lacking a current
+transcript (saving timestamped JSON to the configured JSON prefix), embeds the segments,
+and records them in the catalog and Qdrant. Changed source metadata results in new
+transcript filenames; older outputs are retained. Individual failures are retried with
+backoff while other recordings continue. Ingestion sends audio to OpenAI and incurs API
+usage. Full-recording WAV clips are optional (`WORKER_CREATE_CLIPS`).
 
-1. Lists source recordings in S3.
-2. Sends recordings lacking a current transcript to OpenAI for transcription and
-   saves timestamped JSON in the configured JSON folder.
-3. Creates a full-recording WAV clip for each source version lacking that output.
-4. Loads current transcripts and builds an in-memory Qdrant search index using
-   OpenAI embeddings.
-
-Transcripts and full-recording clips use filenames derived from source metadata.
-Changed source metadata results in new output filenames; older outputs are retained.
-Transcript and clip existence are checked independently. Individual processing
-failures are logged while other outputs continue. Rerun to retry missing outputs.
-Previously requested excerpts do not replace the full-recording clip.
-
-Processing sends audio to OpenAI and incurs API usage. Embeddings are rebuilt at
-startup. Set `S3_AUTO_PROCESS=false` to disable automatic output creation; existing
-transcripts are still loaded and indexed. The app scans at startup, not continuously.
-Restart after adding recordings or running manual processing.
-
-Audio is processed in memory, with no persistent local media or index storage.
+Audio is processed in memory with no local media storage; the catalog and vector index are persisted (see `CATALOG_PATH`, `QDRANT_URL`).
 Large recordings require sufficient memory and must fit the transcription service's
 upload limits; automatic splitting is not implemented. FFmpeg may use temporary
 processing files. Existing local files are not deleted or uploaded.
@@ -144,7 +131,8 @@ Create all missing transcripts and full-recording clips:
 Both commands accept `--profile YOUR_PROFILE`, `--uri s3://bucket/prefix/`, and
 `--limit N`. The limit counts source recordings checked, including recordings
 whose outputs already exist. The processing command exits with a failure status
-if any output failed. Restart the app afterward to refresh its index.
+if any output failed. This legacy script only writes S3 outputs; use the ingestion
+worker to update the search index.
 
 ## Chat examples
 
@@ -223,7 +211,7 @@ under former output prefixes are not migrated automatically.
 | `No module named dotenv` | Run with `.\.venv\Scripts\python.exe` and install `requirements.txt` in that environment. |
 | `ERR_ADDRESS_INVALID` at `0.0.0.0` | Open `http://localhost:8000/`. |
 | AWS credentials unavailable or expired | Configure `.env` or your AWS profile; refresh temporary credentials or SSO login. |
-| Missing transcripts or incomplete search coverage | Check startup processing errors, credentials, permissions, and OpenAI access; rerun processing and restart. |
+| Missing transcripts or incomplete search coverage | Run `python -m wav_search_agent.worker status` for failures, check credentials, permissions, and OpenAI access, then `retry-failed`. |
 | A name is not found | Inspect coverage and transcript wording; a partial name is not a confirmed full-name match. |
 | Clip generation or playback fails | Check FFmpeg, S3 read/write permissions, and valid AWS signing credentials. |
 | Answer says "Here is the clip" but no player appears | Restart the app and press Ctrl+F5. Retry the request; check `/api/chat` in browser developer tools for a nonempty `clips` list. |
@@ -243,3 +231,32 @@ S3 paths and error handling, clip generation, transcript coverage, name matching
 conversation history, structured clip delivery, omitted-extraction recovery, and
 date clarification follow-ups. Passing these tests does not verify live AWS or OpenAI
 credentials.
+
+## Ingestion worker
+
+For production volumes, run ingestion separately from the web app. The worker scans
+S3, transcribes new or replaced recordings in parallel, embeds the segments, and
+persists them to a SQLite catalog (job state and full-text search) and a Qdrant
+collection. Rerunning is safe: unchanged recordings are skipped and point IDs are
+deterministic, so retries never duplicate vectors.
+
+```bash
+python -m wav_search_agent.worker run --once        # process everything due, then exit
+python -m wav_search_agent.worker run --interval 60 # keep scanning every 60 seconds
+python -m wav_search_agent.worker status            # counts by state, plus failures
+python -m wav_search_agent.worker retry-failed      # re-queue permanently failed calls
+```
+
+- Failed recordings retry with exponential backoff (1, 2, 4... minutes, capped at an
+  hour) up to `WORKER_MAX_ATTEMPTS`, then show as `failed` in `status`.
+- A job leased by a crashed worker is reclaimed automatically after its lease expires.
+- Recordings deleted from S3 are removed from the catalog and Qdrant. An empty
+  listing never deletes anything.
+- Set `QDRANT_URL` to share one Qdrant server between the worker and web app. Local
+  path mode holds a file lock, so only one process can open it.
+- Full-recording WAV clips are off by default (`WORKER_CREATE_CLIPS`); the chat app
+  still creates clips on demand.
+- The web app reads the catalog and Qdrant instead of S3. It no longer transcribes or
+  embeds at startup, so run the worker first (or alongside it).
+- Chat search tools use the catalog's full-text index and Qdrant filters; `list_calls`
+  is paged (`offset`, `limit`, `contains`) so the model never receives every call.

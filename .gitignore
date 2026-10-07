@@ -12,3 +12,5 @@ coverage.xml
 static/clips/
 storage/transcripts.json
 storage/audio/.DS_Store
+storage/catalog.sqlite*
+storage/vectors/

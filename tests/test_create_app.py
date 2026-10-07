@@ -3,26 +3,40 @@ from io import BytesIO
 
 from fastapi.testclient import TestClient
 from pydub import AudioSegment
+from qdrant_client import QdrantClient
 import main
+from wav_search_agent.catalog import Catalog
+from wav_search_agent.vector_store import VectorStore
 
 
-def configure(monkeypatch, tmp_path):
+def add_call(catalog, key="calls/a.wav", segments=(("hello", 0, 1),), done=True):
+    uri = f"s3://bucket/{key}"
+    catalog.register([{"uri": uri, "key": key, "fingerprint": "f-" + key, "etag": "e",
+                       "size": 1, "last_modified": "2026-01-01"}])
+    if done:
+        catalog.claim(10, 900, 5)
+        catalog.complete(uri, "f-" + key, [
+            {"idx": i, "start_time": float(start), "end_time": float(end), "text": text}
+            for i, (text, start, end) in enumerate(segments)], 1.0)
+    return uri
+
+
+def configure(monkeypatch, tmp_path, segments=(("hello", 0, 1),), done=True):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("S3_AUTO_PROCESS", "false")
+    monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "catalog.sqlite"))
     monkeypatch.setattr(main, "ROOT", tmp_path)
+    catalog = Catalog(tmp_path / "catalog.sqlite")
+    if segments is not None:
+        add_call(catalog, segments=segments, done=done)
     store = Mock()
     store.bucket = "bucket"
-    store.audio_objects.return_value = [{"Key": "calls/a.wav"}]
-    store.transcript.return_value = {
-        "file_path": "s3://bucket/calls/a.wav",
-        "segments": [{"start": 0, "end": 1, "text": "hello"}],
-    }
     monkeypatch.setattr(main, "S3Store", lambda: store)
+    vectors = VectorStore(QdrantClient(":memory:"))
+    monkeypatch.setattr(main, "VectorStore", Mock(from_env=lambda: vectors))
     embeddings = Mock()
-    embeddings.embed_documents.return_value = [[0.1] * 1536]
     monkeypatch.setattr(main, "OpenAIEmbeddings", lambda **kwargs: embeddings)
     monkeypatch.setattr(main, "ChatOpenAI", lambda **kwargs: Mock())
-    captured = {}
+    captured = {"catalog": catalog, "vectors": vectors}
     def agent(llm, tools, **kwargs):
         captured["tools"] = tools
         return Mock()
@@ -35,7 +49,9 @@ def test_s3_index_and_persisted_clip(monkeypatch, tmp_path):
     app = main.create_app()
     client = TestClient(app)
     assert client.get("/").status_code == 200
-    embeddings.embed_documents.assert_called_once_with(["hello"])
+    store.audio_objects.assert_not_called()  # startup reads the catalog, not S3
+    store.transcript.assert_not_called()
+    embeddings.embed_documents.assert_not_called()
     wav = BytesIO()
     AudioSegment.silent(duration=2000).export(wav, format="wav")
     store.audio_stream.return_value = BytesIO(wav.getvalue())
@@ -49,14 +65,12 @@ def test_s3_index_and_persisted_clip(monkeypatch, tmp_path):
     assert response.headers["location"] == store.clip_url.return_value
     store.clip_url.side_effect = ValueError("Invalid clip name")
     assert client.get("/api/clips/unknown.wav").status_code == 404
-    assert not list(tmp_path.iterdir())
+    assert all(path.name.startswith("catalog.sqlite") for path in tmp_path.iterdir())  # no local clips
 
 
 def test_date_clarification_creates_clip_from_verified_quote(monkeypatch, tmp_path):
     from langchain_core.messages import AIMessage
-    store, _, _ = configure(monkeypatch, tmp_path)
-    store.transcript.return_value["segments"] = [{"start": 0, "end": 1,
-        "text": "This call is coming from Doug's cell."}]
+    store, _, _ = configure(monkeypatch, tmp_path, segments=(("This call is coming from Doug's cell.", 0, 1),))
     wav = BytesIO()
     AudioSegment.silent(duration=2000).export(wav, format="wav")
     store.audio_stream.return_value = BytesIO(wav.getvalue())
@@ -73,21 +87,14 @@ def test_date_clarification_creates_clip_from_verified_quote(monkeypatch, tmp_pa
     store.save_clip.assert_called_once()
 
 
-def test_s3_failure_has_no_local_fallback(monkeypatch, tmp_path):
-    store, embeddings, _ = configure(monkeypatch, tmp_path)
-    local = tmp_path / "storage" / "json"
-    local.mkdir(parents=True)
-    (local / "old.json").write_text('{"segments": [{"text": "local"}]}')
-    store.audio_objects.side_effect = RuntimeError("No AWS credentials")
-    app = main.create_app()
-    embeddings.embed_documents.assert_not_called()
-    response = TestClient(app).post("/api/chat", json={"message": "search"})
-    assert "No AWS credentials" in response.json()["response"]
+def test_empty_catalog_tells_user_to_run_worker(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path, segments=None)
+    response = TestClient(main.create_app()).post("/api/chat", json={"message": "search"})
+    assert "worker run --once" in response.json()["response"]
 
 
 def test_missing_transcripts_returns_actionable_message(monkeypatch, tmp_path):
-    store, embeddings, captured = configure(monkeypatch, tmp_path)
-    store.transcript.return_value = None
+    store, embeddings, captured = configure(monkeypatch, tmp_path, done=False)
     main.create_app()
     tools = {tool.name: tool for tool in captured["tools"]}
     assert "no current transcript" in tools["read_call_transcript"].invoke({"file_path": "a.wav"})
@@ -138,39 +145,57 @@ def test_followup_passes_history_without_sharing_between_requests(monkeypatch, t
 
 def test_name_search_prioritizes_literal_match_and_reports_missing_calls(monkeypatch, tmp_path):
     import json
-    store, embeddings, captured = configure(monkeypatch, tmp_path)
-    store.audio_objects.return_value = [{"Key": "calls/a.wav"}, {"Key": "calls/b.wav"}]
-    store.transcript.side_effect = [
-        {"file_path": "s3://bucket/calls/a.wav", "segments": [
-            {"start": 2, "end": 5, "text": "Please contact Doug Miers tomorrow."}]}, None]
+    store, embeddings, captured = configure(
+        monkeypatch, tmp_path, segments=(("Please contact Doug Miers tomorrow.", 2, 5),))
+    add_call(captured["catalog"], "calls/b.wav", done=False)
     main.create_app()
     tools = {tool.name: tool for tool in captured["tools"]}
     result = json.loads(tools["search_transcript_segments"].invoke({"topic_query": "doug miers"}))
     assert result["matches"][0]["start_time"] == 2
     assert result["match_type"] == "literal"
     assert result["coverage"]["missing_transcripts"] == ["s3://bucket/calls/b.wav"]
+    assert result["coverage"]["missing_count"] == 1
     embeddings.embed_query.assert_not_called()
 
 
-def test_startup_syncs_before_loading_transcripts(monkeypatch, tmp_path):
-    store, _, _ = configure(monkeypatch, tmp_path)
-    monkeypatch.setenv("S3_AUTO_PROCESS", "true")
-    events = []
-    monkeypatch.setattr(main, "sync_outputs", lambda source: events.append("sync") or {})
-    payload = store.transcript.return_value
-    store.transcript.side_effect = lambda item: events.append("load") or payload
+def test_semantic_search_uses_persisted_vectors(monkeypatch, tmp_path):
+    import json
+    _, embeddings, captured = configure(monkeypatch, tmp_path)
+    segment = {"idx": 0, "start_time": 0.0, "end_time": 1.0, "text": "hello"}
+    captured["vectors"].replace_call("s3://bucket/calls/a.wav", "f-calls/a.wav", [segment], [[0.1] * 1536])
+    embeddings.embed_query.return_value = [0.1] * 1536
     main.create_app()
-    assert events == ["sync", "load"]
+    tools = {tool.name: tool for tool in captured["tools"]}
+    result = json.loads(tools["search_transcript_segments"].invoke({"topic_query": "greeting"}))
+    assert result["match_type"] == "semantic_candidates"
+    assert result["matches"][0]["file_path"] == "s3://bucket/calls/a.wav"
+
+
+def test_startup_does_not_touch_s3_or_reembed(monkeypatch, tmp_path):
+    store, embeddings, _ = configure(monkeypatch, tmp_path)
+    main.create_app()
+    assert store.method_calls == []
+    embeddings.embed_documents.assert_not_called()
+
+
+def test_list_calls_is_paged_and_filterable(monkeypatch, tmp_path):
+    import json
+    _, _, captured = configure(monkeypatch, tmp_path)
+    for index in range(5):
+        add_call(captured["catalog"], f"calls/extra{index}.wav", done=False)
+    main.create_app()
+    tools = {tool.name: tool for tool in captured["tools"]}
+    page = json.loads(tools["list_calls"].invoke({"limit": 2}))
+    assert page["total"] == 6 and len(page["calls"]) == 2
+    filtered = json.loads(tools["list_calls"].invoke({"contains": "extra3"}))
+    assert [c["file_path"] for c in filtered["calls"]] == ["s3://bucket/calls/extra3.wav"]
+    assert filtered["calls"][0]["transcribed"] is False
 
 
 def test_name_search_labels_partial_mentions_without_claiming_identity(monkeypatch, tmp_path):
     import json
-    store, _, captured = configure(monkeypatch, tmp_path)
-    store.transcript.return_value["segments"] = [
-        {"start": 0, "end": 2, "text": "Doug's cell called."},
-        {"start": 2, "end": 4, "text": "Doug Miers called."},
-        {"start": 4, "end": 6, "text": "Douglas called."},
-    ]
+    store, _, captured = configure(monkeypatch, tmp_path, segments=(
+        ("Doug's cell called.", 0, 2), ("Doug Miers called.", 2, 4), ("Douglas called.", 4, 6)))
     main.create_app()
     tools = {tool.name: tool for tool in captured["tools"]}
     result = json.loads(tools["search_name_mentions"].invoke({"name": "Doug Miers"}))

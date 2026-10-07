@@ -6,9 +6,8 @@ from openai import OpenAI
 from pydub import AudioSegment
 
 
-def transcribe_object(store, client, item):
-    if store.transcript(item) is not None:
-        return False
+def transcribe_and_save(store, client, item):
+    """Transcribe a recording and save the transcript to S3. Returns the payload."""
     kwargs = {"IfMatch": item["ETag"]} if item.get("ETag") else {}
     audio = store.read(item["Key"], **kwargs)
     client = client or OpenAI()
@@ -16,12 +15,20 @@ def transcribe_object(store, client, item):
         model="whisper-1", file=(PurePosixPath(item["Key"]).name, audio),
         response_format="verbose_json", timestamp_granularities=["segment"],
     )
-    store.save_transcript(item, {
+    payload = {
         "file_path": store.uri(item["Key"]), "text": transcription.text,
         "segments": [{"id": index, "start": float(segment.start),
                       "end": float(segment.end), "text": segment.text.strip()}
                      for index, segment in enumerate(transcription.segments or [])],
-    })
+    }
+    store.save_transcript(item, payload)
+    return payload
+
+
+def transcribe_object(store, client, item):
+    if store.transcript(item) is not None:
+        return False
+    transcribe_and_save(store, client, item)
     return True
 
 

@@ -64,9 +64,12 @@ class S3Store:
     def audio_stream(self, uri):
         return BytesIO(self.read(self.audio_key(uri)))
 
-    def transcript_key(self, item):
+    def fingerprint(self, item):
         identity = json.dumps([item["Key"], item.get("ETag"), str(item.get("LastModified")), item["Size"]])
-        return self.json_prefix + sha256(identity.encode()).hexdigest() + ".json"
+        return sha256(identity.encode()).hexdigest()
+
+    def transcript_key(self, item):
+        return self.json_prefix + self.fingerprint(item) + ".json"
 
     def transcript(self, item):
         try:

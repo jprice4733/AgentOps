@@ -7,6 +7,8 @@ JSON_DIR = BASE_DIR / "storage" / "json"
 STATIC_DIR = BASE_DIR / "static"
 CLIPS_DIR = STATIC_DIR / "clips"
 QDRANT_DIR = BASE_DIR / "storage" / "qdrant"
+CATALOG_FILE = BASE_DIR / "storage" / "catalog.sqlite"
+VECTOR_DIR = BASE_DIR / "storage" / "vectors"
 EMBEDDING_CACHE_FILE = JSON_DIR / "embedding_cache.json"
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm"}
