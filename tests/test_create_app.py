@@ -243,3 +243,27 @@ def test_clip_request_extracts_name_match_when_agent_only_describes_it(monkeypat
     assert len(result["clips"]) == 1
     assert '<audio controls' in result["response"]
     store.save_clip.assert_called_once()
+
+
+def test_search_results_include_labeled_clips_without_asking(monkeypatch, tmp_path):
+    import json
+    from langchain_core.messages import AIMessage, ToolMessage
+    store, _, _ = configure(monkeypatch, tmp_path)
+    wav = BytesIO()
+    AudioSegment.silent(duration=2000).export(wav, format="wav")
+    store.audio_stream.side_effect = lambda uri: BytesIO(wav.getvalue())
+    agent = Mock()
+    agent.ainvoke = AsyncMock(return_value={"messages": [
+        ToolMessage(content=json.dumps({"matches": [{
+            "file_path": "s3://bucket/calls/a.wav", "start_time": 1, "end_time": 2,
+            "text": "Doug Miers", "match_type": "exact_name"}]}),
+            name="search_name_mentions", tool_call_id="1"),
+        AIMessage(content="Found one call."),
+    ]})
+    monkeypatch.setattr(main, "create_agent", lambda *args, **kwargs: agent)
+    client = TestClient(main.create_app())
+    result = client.post("/api/chat", json={"message": "give me calls that mention doug miers"}).json()
+    assert len(result["clips"]) == 1
+    assert "a.wav at 0:01" in result["response"] and "<audio controls" in result["response"]
+    opted_out = client.post("/api/chat", json={"message": "calls that mention doug miers, no audio"}).json()
+    assert opted_out["clips"] == []

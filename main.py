@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import sys
@@ -33,6 +34,7 @@ def create_app():
     catalog = Catalog(os.getenv("CATALOG_PATH", str(CATALOG_FILE)))
     clip_context_seconds = max(0.0, float(os.getenv("CLIP_CONTEXT_SECONDS", "15")))
     MAX_MATCHES = 50
+    MAX_CLIPS = 10
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -241,15 +243,16 @@ def create_app():
                         if url not in clips:
                             clips.append(url)
             # Some agent responses describe a match but omit the extraction call.
-            # Only use grounded name/literal results, never arbitrary semantic candidates.
+            # Grounded name/literal matches always get clips unless the user opts out;
+            # arbitrary semantic candidates never do.
             clip_pattern = r"\b(clips?|play|listen|audio)\b"
             wants_clip = bool(re.search(clip_pattern, request.message, re.I))
             if not wants_clip and len(request.message.split()) <= 8:
                 previous_users = [turn.content for turn in request.history if turn.role == "user"]
                 wants_clip = any(re.search(clip_pattern, text, re.I) for text in previous_users[-3:])
-            if re.search(r"\b(no|don't|do not)\s+(audio|clips?|play)\b", request.message, re.I):
-                wants_clip = False
-            if not clips and wants_clip:
+            no_audio = bool(re.search(r"\b(no|don't|do not|without)\s+(audio|clips?|play)\b", request.message, re.I))
+            built = []
+            if not clips and not no_audio:
                 candidates = []
                 for message in result["messages"]:
                     if (getattr(message, "type", None) != "tool"
@@ -267,7 +270,7 @@ def create_app():
                                 (payload.get("match_type") == "literal" or
                                  match.get("match_type") in ("exact_name", "first_name_only"))):
                             candidates.append(match)
-                if not candidates:
+                if not candidates and wants_clip:
                     # A follow-up may quote a previously selected result without rerunning
                     # tools. Recover only text verified against the named call's transcript.
                     answer = normalize(response_text)
@@ -283,19 +286,29 @@ def create_app():
                             if len(quoted) >= 12 and quoted in answer:
                                 candidates.append({"file_path": uri, "start_time": segment["start_time"],
                                                    "end_time": segment["end_time"]})
-                seen = set()
-                for match in candidates[:10]:
+                unique = {}
+                for match in candidates:
                     args = {key: match[key] for key in ("file_path", "start_time", "end_time")}
-                    identity = tuple(args.values())
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
+                    unique.setdefault(tuple(args.values()), args)
+                for args in list(unique.values())[:MAX_CLIPS]:
                     try:
-                        clips.append(await extract_audio_clip.ainvoke(args))
+                        url = await extract_audio_clip.ainvoke(args)
                     except Exception:
                         response_text += "<p>A matching clip could not be created. Please retry.</p>"
+                        continue
+                    clips.append(url)
+                    built.append((url, args))
+                if len(unique) > MAX_CLIPS:
+                    response_text += (f"<p>Showing clips for the first {MAX_CLIPS} of {len(unique)} "
+                                      "matches. Ask for a specific call to hear the rest.</p>")
             # Include a server-built player as well as structured data for older UI tabs.
+            labels = {url: args for url, args in built}
             for url in clips:
+                args = labels.get(url)
+                if args:
+                    minutes, seconds = divmod(int(args["start_time"]), 60)
+                    response_text += (f"<p>{html.escape(args['file_path'].rsplit('/', 1)[-1])}"
+                                      f" at {minutes}:{seconds:02d}</p>")
                 response_text += f'<audio controls preload="none" src="{url}"></audio>'
             coverage = search_coverage()
             if coverage["missing_count"]:
