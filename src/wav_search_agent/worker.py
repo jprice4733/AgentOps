@@ -12,6 +12,7 @@ import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -37,11 +38,13 @@ class WorkerConfig:
     lease_seconds: int = 900
     embed_batch: int = 64
     create_clips: bool = False
+    heartbeat_file: str | None = None
 
     @classmethod
     def from_env(cls):
         return cls(
             workers=int(os.getenv("WORKER_CONCURRENCY", "4")),
+            heartbeat_file=os.getenv("WORKER_HEARTBEAT_FILE") or None,
             max_attempts=int(os.getenv("WORKER_MAX_ATTEMPTS", "5")),
             create_clips=os.getenv("WORKER_CREATE_CLIPS", "false").lower() in ("true", "1", "yes"))
 
@@ -65,6 +68,11 @@ class IngestWorker:
         self.transcriber, self.embedder = transcriber, embedder
         self.config = config or WorkerConfig()
         self.stop = stop_event or threading.Event()
+
+    def _beat(self):
+        """Touch the heartbeat file so a supervisor can tell the worker is making progress."""
+        if self.config.heartbeat_file:
+            Path(self.config.heartbeat_file).touch()
 
     def scan(self):
         """Compare S3 against the catalog; queue new or replaced recordings."""
@@ -128,9 +136,11 @@ class IngestWorker:
 
     def run_once(self):
         """Scan, then process every job that is due. Backed-off retries wait for the next run."""
+        self._beat()
         report = {"scan": self.scan(), "done": 0, "retrying": 0, "failed": 0, "stale": 0}
         with ThreadPoolExecutor(max_workers=self.config.workers) as pool:
             while not self.stop.is_set():
+                self._beat()
                 jobs = self.catalog.claim(self.config.workers * 2, self.config.lease_seconds,
                                           self.config.max_attempts)
                 if not jobs:

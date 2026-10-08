@@ -1,0 +1,24 @@
+# Ingestion worker without Docker. Assumes the app is in /opt/wav-search-agent with a
+# .venv, a Qdrant server reachable at QDRANT_URL, and settings in /etc/wav-search-agent.env.
+#   sudo cp deploy/wav-search-*.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wav-search-worker wav-search-web
+[Unit]
+Description=WAV Search Agent ingestion worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=wavsearch
+WorkingDirectory=/opt/wav-search-agent
+EnvironmentFile=/etc/wav-search-agent.env
+Environment=PYTHONPATH=/opt/wav-search-agent/src
+Environment=WORKER_HEARTBEAT_FILE=/var/lib/wav-search-agent/worker.heartbeat
+ExecStart=/opt/wav-search-agent/.venv/bin/python -m wav_search_agent.worker run --interval 60
+Restart=always
+RestartSec=10
+StateDirectory=wav-search-agent
+# Stop quickly but let in-flight transcriptions finish.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

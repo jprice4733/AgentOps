@@ -187,3 +187,13 @@ def test_local_vector_store_is_safe_under_concurrent_workers(tmp_path):
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(work, range(40)))
     assert vectors.count() == 40 * 20
+
+
+def test_heartbeat_file_is_touched_while_running(env, tmp_path):
+    _, store, catalog, vectors, _ = env
+    beat = tmp_path / "worker.heartbeat"
+    worker = IngestWorker(store, catalog, vectors, transcriber(), FakeEmbedder(),
+                          WorkerConfig(workers=1, heartbeat_file=str(beat)))
+    assert not beat.exists()
+    worker.run_once()
+    assert beat.exists()

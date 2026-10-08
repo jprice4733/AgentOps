@@ -17,6 +17,34 @@ clips reside in S3. Local recordings and transcript files are ignored.
 - Returns clip URLs separately from answer text and provides an audio player plus an "Open audio clip" link.
 - Reports incomplete transcript coverage rather than implying all calls were searched.
 
+## Quick start with Docker
+
+The quickest way to run the app locally. It starts the web app, the ingestion worker
+and a Qdrant vector database; no Python or FFmpeg install is needed.
+
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker
+   Engine with the Compose plugin) and Git.
+2. Clone the repository and `cd` into the project root.
+3. Create the config file with `cp .env.example .env` and set:
+   - `OPENAI_API_KEY`: your OpenAI API key.
+   - `S3_AUDIO_URI`, `S3_JSON_PREFIX`, `S3_CLIPS_PREFIX`: your bucket and prefixes.
+     The defaults point at a demo bucket.
+   - `AWS_DEFAULT_REGION`: the region of your bucket.
+   - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, plus `AWS_SESSION_TOKEN` for
+     temporary credentials. `AWS_PROFILE` does not work in the container because
+     `~/.aws` is not mounted. See [AWS permissions](#aws-permissions) for the access needed.
+4. Build and start everything: `docker compose up -d --build`. The first build takes a
+   few minutes.
+5. Open http://127.0.0.1:8000. The worker transcribes new recordings in the background,
+   so calls become searchable shortly after they are found. Check progress with
+   `docker compose exec worker python -m wav_search_agent.worker status`.
+6. Stop with `docker compose down`. Data is kept in Docker volumes; add `-v` to delete it.
+
+Transcription and search use your OpenAI key and are billed to it. The app has no login
+and is published on `127.0.0.1` only; do not expose it to a network without an
+authenticating reverse proxy. To run only the web app and Qdrant, use
+`docker compose up -d --build web`. See [Deployment](#deployment) for more.
+
 ## Setup
 
 Run commands from the project root. On Windows, use the project interpreter directly
@@ -260,3 +288,31 @@ python -m wav_search_agent.worker retry-failed      # re-queue permanently faile
   embeds at startup, so run the worker first (or alongside it).
 - Chat search tools use the catalog's full-text index and Qdrant filters; `list_calls`
   is paged (`offset`, `limit`, `contains`) so the model never receives every call.
+
+## Deployment
+
+Both options run the web app, the ingestion worker and a Qdrant server, and restart
+them automatically. The worker polls S3 every 60 seconds, so new recordings are
+transcribed and searchable shortly after they arrive.
+
+**Docker Compose (recommended)**
+
+```bash
+cp .env.example .env     # set OPENAI_API_KEY, S3_* and AWS credentials (or use an instance role)
+docker compose up -d --build   # see "Quick start with Docker" above for details
+docker compose ps                      # worker shows healthy while it makes progress
+docker compose exec worker python -m wav_search_agent.worker status
+```
+
+The web app is published on `127.0.0.1:8000` only. There is no login yet, so put an
+authenticating reverse proxy in front of it before exposing it to a network.
+The worker is marked unhealthy if it makes no progress for 10 minutes.
+
+**systemd (no Docker)**
+
+Install the app in `/opt/wav-search-agent` with a `.venv`, run a Qdrant server, and
+create `/etc/wav-search-agent.env` with the `.env` settings plus
+`CATALOG_PATH=/var/lib/wav-search-agent/catalog.sqlite` and `QDRANT_URL=http://localhost:6333`.
+Then install the units in [deploy/](deploy/) as described at the top of each file.
+
+The web app binds to `127.0.0.1` unless `WEB_HOST` is set (the container sets `0.0.0.0`).

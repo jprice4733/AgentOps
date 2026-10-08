@@ -1,0 +1,47 @@
+# Web app, ingestion worker and Qdrant on one host.
+#   cp .env.example .env   (set OPENAI_API_KEY, S3_*, AWS credentials)
+#   docker compose up -d --build
+# The web port is bound to localhost only: there is no login yet, so put an
+# authenticating reverse proxy in front before exposing it.
+x-app: &app
+  build: .
+  env_file: .env
+  environment:
+    CATALOG_PATH: /data/catalog.sqlite
+    QDRANT_URL: http://qdrant:6333
+  volumes:
+    - app-data:/data
+  restart: unless-stopped
+  depends_on:
+    - qdrant
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "wav_search_agent.worker", "run", "--interval", "60"]
+    environment:
+      CATALOG_PATH: /data/catalog.sqlite
+      QDRANT_URL: http://qdrant:6333
+      WORKER_HEARTBEAT_FILE: /data/worker.heartbeat
+    healthcheck:
+      # Unhealthy if the worker has made no progress for 10 minutes.
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime('/data/worker.heartbeat')<600 else 1)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  app-data:
+  qdrant-data:

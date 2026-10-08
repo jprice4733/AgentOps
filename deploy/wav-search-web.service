@@ -1,0 +1,17 @@
+[Unit]
+Description=WAV Search Agent web app
+After=network-online.target wav-search-worker.service
+Wants=network-online.target
+
+[Service]
+User=wavsearch
+WorkingDirectory=/opt/wav-search-agent
+EnvironmentFile=/etc/wav-search-agent.env
+Environment=PYTHONPATH=/opt/wav-search-agent/src
+ExecStart=/opt/wav-search-agent/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+StateDirectory=wav-search-agent
+
+[Install]
+WantedBy=multi-user.target
