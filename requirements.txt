@@ -8,3 +8,4 @@ pydub
 python-dotenv
 httpx[socks]
 boto3
+tzdata

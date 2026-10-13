@@ -2,6 +2,7 @@
 
     python -m wav_search_agent.worker run --once      # process everything due, then exit
     python -m wav_search_agent.worker run --interval 60
+    python -m wav_search_agent.worker run --daily-midnight --timezone America/Denver
     python -m wav_search_agent.worker status
     python -m wav_search_agent.worker retry-failed
 """
@@ -12,7 +13,9 @@ import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -25,6 +28,12 @@ from .vector_store import VectorStore
 log = logging.getLogger("wav_search_agent.worker")
 
 WHISPER_MAX_BYTES = 25 * 1024 * 1024
+
+
+def next_midnight(now, zone):
+    """Return the next local midnight in UTC, including daylight-saving changes."""
+    tomorrow = now.astimezone(zone).date() + timedelta(days=1)
+    return datetime.combine(tomorrow, time.min, tzinfo=zone).astimezone(timezone.utc)
 
 
 class PermanentError(Exception):
@@ -116,12 +125,22 @@ class IngestWorker:
         if not self.catalog.complete(job["uri"], job["fingerprint"], segments, duration):
             log.info("Recording changed during processing; it will be re-queued: %s", job["uri"])
             return "stale"
-        if self.config.create_clips:
-            try:
-                create_recording_clip(self.store, item)
-            except Exception as exc:  # a missing full-recording clip must not fail indexing
-                log.warning("Full-recording clip failed for %s: %s", job["uri"], exc)
         return "done"
+
+    def sync_clips(self):
+        """Fill missing clips even for calls already indexed; retry failures next run."""
+        report = {"created": 0, "existing": 0, "failed": 0}
+        for item in self.store.audio_objects():
+            if self.stop.is_set():
+                break
+            self._beat()
+            try:
+                created = create_recording_clip(self.store, item)
+                report["created" if created else "existing"] += 1
+            except Exception as exc:
+                report["failed"] += 1
+                log.warning("Full-recording clip failed for %s: %s", self.store.uri(item["Key"]), exc)
+        return report
 
     def _run_job(self, job):
         try:
@@ -147,6 +166,8 @@ class IngestWorker:
                     break
                 for result in pool.map(self._run_job, jobs):
                     report[{"pending": "retrying"}.get(result, result)] += 1
+        if self.config.create_clips and not self.stop.is_set():
+            report["clips"] = self.sync_clips()
         log.info("Run complete: %s", report)
         return report
 
@@ -157,6 +178,24 @@ class IngestWorker:
             except Exception:
                 log.exception("Ingestion run failed; will retry")
             self.stop.wait(interval)
+
+    def run_daily(self, zone):
+        """Wait for local midnight, then run once. Keep health checks alive while idle."""
+        while not self.stop.is_set():
+            scheduled = next_midnight(datetime.now(timezone.utc), zone)
+            log.info("Next daily update: %s (%s)", scheduled.astimezone(zone).isoformat(), zone.key)
+            while not self.stop.is_set():
+                self._beat()
+                remaining = (scheduled - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    break
+                self.stop.wait(min(remaining, 30))
+            if self.stop.is_set():
+                return
+            try:
+                self.run_once()
+            except Exception:
+                log.exception("Daily update failed; will retry at the next midnight")
 
 
 def build_worker(args):
@@ -183,8 +222,11 @@ def main(argv=None):
     parser.add_argument("--profile")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
-    run.add_argument("--once", action="store_true", help="exit when nothing is due")
-    run.add_argument("--interval", type=int, default=60, help="seconds between scans")
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="exit when nothing is due")
+    mode.add_argument("--interval", type=int, default=None, help="seconds between scans (default: 60)")
+    mode.add_argument("--daily-midnight", action="store_true", help="run once each local midnight")
+    run.add_argument("--timezone", default="America/Denver", help="IANA timezone for daily midnight")
     run.add_argument("--workers", type=int)
     commands.add_parser("status")
     commands.add_parser("retry-failed")
@@ -201,13 +243,22 @@ def main(argv=None):
                 print(f"FAILED {failure['uri']} (attempts {failure['attempts']}): {failure['last_error']}")
         return 0
 
+    zone = None
+    if args.daily_midnight:
+        try:
+            zone = ZoneInfo(args.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            parser.error(f"Unknown timezone: {args.timezone}")
     worker = build_worker(args)
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: worker.stop.set())
     if args.once:
         report = worker.run_once()
-        return 1 if report["failed"] else 0
-    worker.run_forever(args.interval)
+        return 1 if report["failed"] or report.get("clips", {}).get("failed") else 0
+    if args.daily_midnight:
+        worker.run_daily(zone)
+    else:
+        worker.run_forever(args.interval if args.interval is not None else 60)
     return 0
 
 

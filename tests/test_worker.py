@@ -1,6 +1,8 @@
 import datetime
 import io
+import wave
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from botocore.exceptions import ClientError
@@ -9,7 +11,7 @@ from qdrant_client import QdrantClient
 from wav_search_agent.catalog import Catalog
 from wav_search_agent.s3_store import S3Store
 from wav_search_agent.vector_store import VectorStore
-from wav_search_agent.worker import IngestWorker, WorkerConfig
+from wav_search_agent.worker import IngestWorker, WorkerConfig, next_midnight
 
 NOW = datetime.datetime(2026, 1, 1)
 
@@ -40,6 +42,11 @@ class FakeS3:
 
     def put_object(self, Bucket, Key, Body, **kwargs):
         self.objects[Key] = {"data": Body, "ETag": "x", "LastModified": NOW}
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {}
 
 
 def transcriber(text="adjusted my neck", fail=None):
@@ -197,3 +204,80 @@ def test_heartbeat_file_is_touched_while_running(env, tmp_path):
     assert not beat.exists()
     worker.run_once()
     assert beat.exists()
+
+
+def test_clips_backfill_and_retry_without_retranscribing(env):
+    s3, store, catalog, vectors, make = env
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b"\0\0" * 80)
+    s3.add("calls/a.wav", data=output.getvalue())
+    client = transcriber()
+    worker = make(client)
+    worker.run_once()  # indexed before clip creation was enabled
+    worker.config.create_clips = True
+    report = worker.run_once()
+    assert report["done"] == 0
+    assert report["clips"] == {"created": 1, "existing": 0, "failed": 0}
+    clip_key = next(k for k in s3.objects if k.startswith(store.clips_prefix))
+    assert worker.run_once()["clips"] == {"created": 0, "existing": 1, "failed": 0}
+    del s3.objects[clip_key]
+    assert worker.run_once()["clips"]["created"] == 1
+    assert client.audio.transcriptions.create.call_count == 1
+    assert catalog.stats()["calls"] == {"done": 1}
+    assert vectors.count() == 1
+
+
+def test_clip_failure_retries_next_run_and_other_clips_continue(env, monkeypatch):
+    s3, _, catalog, _, make = env
+    s3.add("calls/b.wav", etag="b1")
+    worker = make()
+    worker.config.create_clips = True
+    create = Mock(side_effect=[RuntimeError("S3 unavailable"), True, True, False])
+    monkeypatch.setattr("wav_search_agent.worker.create_recording_clip", create)
+    assert worker.run_once()["clips"] == {"created": 1, "existing": 0, "failed": 1}
+    assert catalog.stats()["calls"] == {"done": 2}
+    assert worker.run_once()["clips"] == {"created": 1, "existing": 1, "failed": 0}
+
+
+@pytest.mark.parametrize("day,hours", [(datetime.date(2026, 3, 8), 23),
+                                      (datetime.date(2026, 11, 1), 25)])
+def test_midnight_schedule_observes_denver_dst(day, hours):
+    zone = ZoneInfo("America/Denver")
+    start = datetime.datetime.combine(day, datetime.time.min, tzinfo=zone)
+    utc_start = start.astimezone(datetime.timezone.utc)
+    scheduled = next_midnight(utc_start, zone)
+    assert (scheduled - utc_start).total_seconds() == hours * 3600
+    local = scheduled.astimezone(zone)
+    assert local.date() == day + datetime.timedelta(days=1)
+    assert local.hour == local.minute == 0
+
+
+def test_daily_waits_until_midnight_and_runs_once(env, monkeypatch):
+    _, _, _, _, make = env
+    worker = make()
+    before = datetime.datetime(2026, 10, 14, 5, 59, 40, tzinfo=datetime.timezone.utc)
+    midnight = before + datetime.timedelta(seconds=20)
+    clock = Mock(wraps=datetime.datetime)
+    clock.now.side_effect = [before, before, midnight]
+    monkeypatch.setattr("wav_search_agent.worker.datetime", clock)
+    worker.stop.wait = Mock(return_value=False)
+    worker.run_once = Mock(side_effect=worker.stop.set)
+    worker.run_daily(ZoneInfo("America/Denver"))
+    worker.stop.wait.assert_called_once_with(20)
+    worker.run_once.assert_called_once_with()
+
+
+def test_daily_wait_maintains_heartbeat_and_stops_without_processing(env, tmp_path):
+    _, _, _, _, make = env
+    worker = make()
+    beat = tmp_path / "heartbeat"
+    worker.config.heartbeat_file = str(beat)
+    worker.stop.wait = Mock(side_effect=lambda timeout: worker.stop.set())
+    worker.run_once = Mock()
+    worker.run_daily(ZoneInfo("America/Denver"))
+    assert beat.exists()
+    worker.run_once.assert_not_called()

@@ -6,7 +6,7 @@ clips reside in S3. Local recordings and transcript files are ignored.
 
 ## Features
 
-- Automatically creates missing transcripts and full-recording WAV clips at startup.
+- Docker worker creates missing transcripts and full-recording WAV clips nightly at midnight Denver time.
 - Reuses existing outputs for unchanged recordings and retries missing outputs.
 - Searches transcripts by topic, exact phrase, or person name.
 - Offers first-name-only mentions as possible matches, with identity explicitly unconfirmed.
@@ -35,8 +35,10 @@ and a Qdrant vector database; no Python or FFmpeg install is needed.
      `~/.aws` is not mounted. See [AWS permissions](#aws-permissions) for the access needed.
 4. Build and start everything: `docker compose up -d --build`. The first build takes a
    few minutes.
-5. Open http://127.0.0.1:8000. The worker transcribes new recordings in the background,
-   so calls become searchable shortly after they are found. Check progress with
+5. Open http://127.0.0.1:8000. The worker updates recordings nightly at midnight
+   Denver time; it waits until the next midnight after startup. For an immediate update,
+   run `docker compose exec worker python -m wav_search_agent.worker run --once`.
+   Check progress with
    `docker compose exec worker python -m wav_search_agent.worker status`.
 6. Stop with `docker compose down`. Data is kept in Docker volumes; add `-v` to delete it.
 
@@ -271,19 +273,24 @@ deterministic, so retries never duplicate vectors.
 ```bash
 python -m wav_search_agent.worker run --once        # process everything due, then exit
 python -m wav_search_agent.worker run --interval 60 # keep scanning every 60 seconds
+python -m wav_search_agent.worker run --daily-midnight --timezone America/Denver
 python -m wav_search_agent.worker status            # counts by state, plus failures
 python -m wav_search_agent.worker retry-failed      # re-queue permanently failed calls
 ```
 
 - Failed recordings retry with exponential backoff (1, 2, 4... minutes, capped at an
-  hour) up to `WORKER_MAX_ATTEMPTS`, then show as `failed` in `status`.
+  hour) up to `WORKER_MAX_ATTEMPTS`, then show as `failed` in `status`. In daily
+  mode, backed-off retries wait until the next nightly run.
 - A job leased by a crashed worker is reclaimed automatically after its lease expires.
 - Recordings deleted from S3 are removed from the catalog and Qdrant. An empty
   listing never deletes anything.
 - Set `QDRANT_URL` to share one Qdrant server between the worker and web app. Local
   path mode holds a file lock, so only one process can open it.
-- Full-recording WAV clips are off by default (`WORKER_CREATE_CLIPS`); the chat app
-  still creates clips on demand.
+- Full-recording WAV clips are enabled in Docker Compose (`WORKER_CREATE_CLIPS=true`)
+  and off by default when running Python directly. Every enabled run checks all
+  source recordings for missing clips, including previously indexed calls. Existing
+  clips are reused; failed clip creation is retried on the next run independently
+  of transcription. The chat app still creates requested excerpts on demand.
 - The web app reads the catalog and Qdrant instead of S3. It no longer transcribes or
   embeds at startup, so run the worker first (or alongside it).
 - Chat search tools use the catalog's full-text index and Qdrant filters; `list_calls`
@@ -292,8 +299,9 @@ python -m wav_search_agent.worker retry-failed      # re-queue permanently faile
 ## Deployment
 
 Both options run the web app, the ingestion worker and a Qdrant server, and restart
-them automatically. The worker polls S3 every 60 seconds, so new recordings are
-transcribed and searchable shortly after they arrive.
+them automatically. Docker Compose updates transcripts, the search index, and
+full-recording clips daily at **12:00 AM America/Denver**, following MST/MDT changes.
+The systemd example polls every 60 seconds.
 
 **Docker Compose (recommended)**
 
@@ -306,7 +314,18 @@ docker compose exec worker python -m wav_search_agent.worker status
 
 The web app is published on `127.0.0.1:8000` only. There is no login yet, so put an
 authenticating reverse proxy in front of it before exposing it to a network.
-The worker is marked unhealthy if it makes no progress for 10 minutes.
+The worker sends a heartbeat while waiting for midnight and while processing.
+It is marked unhealthy if the heartbeat is more than 10 minutes old.
+
+Keep the computer awake and Docker Desktop running for scheduled updates. Startup
+or restart waits for the next midnight; it does not automatically catch up missed
+runs. If the worker stays running across sleep, an overdue run starts on resume.
+Runs do not overlap within the scheduled worker. Avoid starting a manual update
+while a nightly run is active. To view the next scheduled run and nightly results:
+
+```bash
+docker compose logs --tail 50 worker
+```
 
 **systemd (no Docker)**
 
